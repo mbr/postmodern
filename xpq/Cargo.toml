@@ -6,7 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-readme = "../README.md"
+readme = "README.md"
+documentation = "https://docs.rs/xpq"
 keywords = ["postgres", "job-queue", "async", "background-jobs", "sqlx"]
 categories = ["asynchronous", "database"]
 
