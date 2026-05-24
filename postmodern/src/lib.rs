@@ -649,26 +649,30 @@ impl Queue {
             return Ok(uuid);
         }
 
-        // Query candidates matching the suffix
+        // Query candidates matching the suffix (limit to 11 to detect ambiguity)
         let pattern = format!("%{suffix}");
-        let candidates: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM jobs WHERE id::text LIKE $1")
-            .bind(&pattern)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(ResolveIdError::Query)?;
+        let candidates: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM jobs WHERE id::text LIKE $1 LIMIT 11")
+                .bind(&pattern)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(ResolveIdError::Query)?;
 
         let uuids: Vec<Uuid> = candidates.into_iter().map(|(id,)| id).collect();
         resolve_uuid_suffix(&uuids, suffix).map_err(|e| match e {
             uuid_suffix::ResolveError::NotFound => ResolveIdError::NotFound(suffix.to_string()),
             uuid_suffix::ResolveError::Ambiguous(ids) => {
-                let matches = ids
+                let mut matches: Vec<_> = ids
                     .iter()
+                    .take(10)
                     .map(|id| UuidSuffix::new(id).to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .collect();
+                if ids.len() > 10 {
+                    matches.push("...".to_string());
+                }
                 ResolveIdError::Ambiguous {
                     suffix: suffix.to_string(),
-                    matches,
+                    matches: matches.join(", "),
                 }
             }
         })
