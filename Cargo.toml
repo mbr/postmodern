@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["xpq-lib", "xpq-cli"]
+members = ["xpq", "xpq-cli"]
 
 [workspace.package]
 version = "0.1.0"

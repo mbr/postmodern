@@ -20,7 +20,7 @@ tabled = { workspace = true }
 terminal_size = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid = { workspace = true }
-xpq = { path = "../xpq-lib" }
+xpq = { path = "../xpq" }
 
 [dev-dependencies]
 insta = { workspace = true }
