@@ -3,15 +3,12 @@
 use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder, Retryable};
+use display_full_error::DisplayFullErrorExt;
 use futures::{stream::unfold, Stream};
 use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 
-use crate::{
-    error::{FetchError, WithDetails},
-    job::PendingJob,
-    next_pending_job, Queue,
-};
+use crate::{error::FetchError, job::PendingJob, next_pending_job, Queue};
 
 /// Default delay after a query error before retrying.
 const QUERY_ERROR_DELAY: Duration = Duration::from_secs(5);
@@ -75,17 +72,17 @@ impl Queue {
                     Ok(job) => return Some((job, (pool, queue_name))),
                     Err(StreamError::Empty) => unreachable!("infinite retry"),
                     Err(StreamError::Fetch(FetchError::Query(e))) => {
-                        tracing::warn!(error = %WithDetails(&e), "query error, retrying");
+                        tracing::warn!(error = %e.display_full(), "query error, retrying");
                         tokio::time::sleep(QUERY_ERROR_DELAY).await;
                     }
                     Err(StreamError::Fetch(FetchError::Deserialize(id, e))) => {
-                        tracing::error!(%id, error = %WithDetails(&e), "deserialization failed, marking job as failed");
+                        tracing::error!(%id, error = %e.display_full(), "deserialization failed, marking job as failed");
                         if let Err(fail_err) = crate::Queue::from_pool_unchecked(pool.clone())
-                            .fail_jobs(&[id], &WithDetails(&e).to_string())
+                            .fail_jobs(&[id], &e.to_string_full())
                             .await
                         {
                             tracing::warn!(
-                                %id, error = %WithDetails(&fail_err),
+                                %id, error = %fail_err.display_full(),
                                 "failed to mark job as failed, reaper will handle"
                             );
                         }

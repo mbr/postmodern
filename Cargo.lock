@@ -419,6 +419,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "display_full_error"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7c47e9a2fd28a8edd1446f10dabe8ac5d26bb77ed2b1077bfcd8308904e8c6"
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1286,6 +1292,7 @@ dependencies = [
  "backon",
  "chrono",
  "dirs",
+ "display_full_error",
  "futures",
  "pgdb",
  "rmp-serde",

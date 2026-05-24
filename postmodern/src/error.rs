@@ -79,16 +79,3 @@ pub enum ReapError {
     #[error("database error")]
     Database(#[source] sqlx::Error),
 }
-
-/// Wrapper that displays an error with its full details using alternate format.
-///
-/// When displayed, uses the `{:#}` format which for `anyhow::Error` shows the
-/// full error chain. Avoids allocating a `String` when passed directly to
-/// formatters (e.g., tracing macros).
-pub struct WithDetails<E>(pub E);
-
-impl<E: std::fmt::Display> std::fmt::Display for WithDetails<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#}", self.0)
-    }
-}

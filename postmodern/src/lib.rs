@@ -8,6 +8,7 @@ mod transform;
 
 use std::time::Duration;
 
+use display_full_error::DisplayFullErrorExt;
 use futures::Stream;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,9 +17,7 @@ pub use transform::TransformResult;
 use uuid::Uuid;
 
 use crate::{
-    error::{
-        ConnectError, EnqueueError, FetchError, ListError, ModifyError, ReapError, WithDetails,
-    },
+    error::{ConnectError, EnqueueError, FetchError, ListError, ModifyError, ReapError},
     job::{
         InitialState, JobMetadata, JobStatus, PendingJob, LOCK_DURATION, MAX_RETRIES,
         REAPER_INTERVAL, RETRY_BACKOFF_BASE,
@@ -482,7 +481,7 @@ impl Queue {
                     tokio::time::sleep(sleep_duration).await;
                 }
                 Err(e) => {
-                    tracing::error!(error = %WithDetails(&e), "reaper error");
+                    tracing::error!(error = %e.display_full(), "reaper error");
                     tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             }

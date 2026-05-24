@@ -17,6 +17,7 @@ async-stream = "0.3"
 backon = "1"
 chrono = "0.4"
 dirs = "6"
+display_full_error = { version = "1", features = ["alloc"] }
 futures = { workspace = true }
 rmp-serde = "1"
 serde = { workspace = true }

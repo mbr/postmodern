@@ -3,10 +3,11 @@
 use std::{future::Future, time::Duration};
 
 use chrono::{DateTime, Utc};
+use display_full_error::DisplayFullErrorExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::{AckError, WithDetails};
+use crate::error::AckError;
 
 /// Duration before an in-progress job is considered crashed and eligible for reaping.
 ///
@@ -105,7 +106,7 @@ impl<T> PendingJob<T> {
     where
         F: FnOnce(T) -> Fut,
         Fut: Future<Output = Result<R, E>>,
-        E: std::fmt::Display,
+        E: std::error::Error,
     {
         let (payload, ack) = self.into_parts();
         ack.run(f(payload)).await
@@ -218,14 +219,14 @@ impl JobAck {
     pub async fn run<Fut, T, E>(self, fut: Fut) -> Result<T, JobAckError<T, E>>
     where
         Fut: Future<Output = Result<T, E>>,
-        E: std::fmt::Display,
+        E: std::error::Error,
     {
         match fut.await {
             Ok(value) => match self.commit().await {
                 Ok(()) => Ok(value),
                 Err(e) => Err(JobAckError::FailedToCommit(value, e)),
             },
-            Err(e) => match self.soft_fail(&WithDetails(&e).to_string()).await {
+            Err(e) => match self.soft_fail(&e.to_string_full()).await {
                 Ok(()) => Err(JobAckError::RunError(e)),
                 Err(ack_err) => Err(JobAckError::SoftFailError {
                     error: e,
