@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 futures = { workspace = true }
 rmpv = { version = "1", features = ["with-serde"] }
