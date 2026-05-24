@@ -1054,7 +1054,7 @@ mod tests {
         let job1 = stream.next().await.expect("no job").expect("fetch failed");
         job1.into_parts()
             .1
-            .hard_fail("poison pill")
+            .hard_fail("unrecoverable error")
             .await
             .expect("hard_fail failed");
 
@@ -1073,7 +1073,7 @@ mod tests {
                 .await
                 .expect("query failed");
         assert_eq!(s1, JobStatus::Failed);
-        assert_eq!(err, Some("poison pill".to_string()));
+        assert_eq!(err, Some("unrecoverable error".to_string()));
 
         let (s2, retry_count): (JobStatus, i32) =
             sqlx::query_as("SELECT status, retry_count FROM jobs WHERE id = $1")

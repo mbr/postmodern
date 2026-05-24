@@ -155,7 +155,7 @@ impl JobAck {
 
     /// Marks the job as permanently failed with an error message.
     ///
-    /// Use this for poison pills or unrecoverable errors. The job will not be retried.
+    /// Use this for unrecoverable errors. The job will not be retried.
     /// Returns [`AckError::LockLost`] if the lock was lost due to timeout.
     pub async fn hard_fail(mut self, reason: &str) -> Result<(), AckError> {
         let pool = self.pool.take().expect("ack already consumed");
