@@ -1,0 +1,26 @@
+[package]
+name = "xpq-cli"
+description = "CLI for xpq job queue management."
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "xpq"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+rmpv = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+tabled = { workspace = true }
+terminal_size = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid = { workspace = true }
+xpq = { path = "../xpq-lib" }
+
+[dev-dependencies]
+insta = { workspace = true }
