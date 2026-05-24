@@ -79,3 +79,22 @@ pub enum ReapError {
     #[error("database error")]
     Database(#[source] sqlx::Error),
 }
+
+/// Job ID resolution errors.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveIdError {
+    /// Query execution failed.
+    #[error("query failed")]
+    Query(#[source] sqlx::Error),
+    /// No job matched the suffix.
+    #[error("no job matched '{0}'")]
+    NotFound(String),
+    /// Multiple jobs matched the suffix.
+    #[error("'{suffix}' is ambiguous, matches: {matches}")]
+    Ambiguous {
+        /// The ambiguous suffix.
+        suffix: String,
+        /// Comma-separated list of matching short IDs.
+        matches: String,
+    },
+}

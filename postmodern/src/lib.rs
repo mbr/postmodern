@@ -15,9 +15,12 @@ use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, FromRow, PgPool, Row};
 pub use transform::TransformResult;
 use uuid::Uuid;
+use uuid_suffix::{resolve_uuid_suffix, UuidSuffix};
 
 use crate::{
-    error::{ConnectError, EnqueueError, FetchError, ListError, ModifyError, ReapError},
+    error::{
+        ConnectError, EnqueueError, FetchError, ListError, ModifyError, ReapError, ResolveIdError,
+    },
     job::{
         InitialState, JobMetadata, JobStatus, PendingJob, LOCK_DURATION, MAX_RETRIES,
         REAPER_INTERVAL, RETRY_BACKOFF_BASE,
@@ -636,6 +639,55 @@ impl Queue {
         .map_err(ListError::Query)
     }
 
+    /// Resolves a job ID suffix or full UUID to a single job ID.
+    ///
+    /// Accepts either a full UUID or a hex suffix (1-32 characters). Suffixes are matched against
+    /// all job IDs in the database. Returns an error if the suffix is ambiguous or no job matches.
+    pub async fn resolve_job_id(&self, suffix: &UuidSuffix) -> Result<Uuid, ResolveIdError> {
+        // Fast path: full UUID needs no DB query
+        if let Some(uuid) = suffix.to_uuid() {
+            return Ok(uuid);
+        }
+
+        // Query candidates matching the suffix
+        let pattern = format!("%{suffix}");
+        let candidates: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM jobs WHERE id::text LIKE $1")
+            .bind(&pattern)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(ResolveIdError::Query)?;
+
+        let uuids: Vec<Uuid> = candidates.into_iter().map(|(id,)| id).collect();
+        resolve_uuid_suffix(&uuids, suffix).map_err(|e| match e {
+            uuid_suffix::ResolveError::NotFound => ResolveIdError::NotFound(suffix.to_string()),
+            uuid_suffix::ResolveError::Ambiguous(ids) => {
+                let matches = ids
+                    .iter()
+                    .map(|id| UuidSuffix::new(id).to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ResolveIdError::Ambiguous {
+                    suffix: suffix.to_string(),
+                    matches,
+                }
+            }
+        })
+    }
+
+    /// Resolves multiple job ID suffixes or full UUIDs to job IDs.
+    ///
+    /// Each input is resolved independently. Returns all resolved IDs or the first error.
+    pub async fn resolve_job_ids(
+        &self,
+        suffixes: &[UuidSuffix],
+    ) -> Result<Vec<Uuid>, ResolveIdError> {
+        let mut results = Vec::with_capacity(suffixes.len());
+        for suffix in suffixes {
+            results.push(self.resolve_job_id(suffix).await?);
+        }
+        Ok(results)
+    }
+
     /// Pulls the next pending job from a queue, locking it for processing.
     ///
     /// Returns job details, raw payload bytes, and an acknowledgment handle. The job transitions
@@ -1019,6 +1071,7 @@ mod tests {
     use std::pin::pin;
 
     use futures::StreamExt;
+    use uuid_suffix::UuidSuffix;
 
     use crate::{job::JobStatus, EnqueueOptions, Queue};
 
@@ -1293,5 +1346,48 @@ mod tests {
             .await
             .expect("list failed");
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_job_id_full_uuid() {
+        let (queue, _db) = setup_db().await;
+
+        let id = queue
+            .enqueue("test", 42i32, EnqueueOptions::default())
+            .await
+            .expect("enqueue failed");
+
+        // Full UUID resolves directly without DB lookup
+        let suffix = UuidSuffix::full(&id);
+        let resolved = queue.resolve_job_id(&suffix).await.expect("resolve failed");
+        assert_eq!(resolved, id);
+    }
+
+    #[tokio::test]
+    async fn resolve_job_id_suffix_match() {
+        let (queue, _db) = setup_db().await;
+
+        let id = queue
+            .enqueue("test", 42i32, EnqueueOptions::default())
+            .await
+            .expect("enqueue failed");
+
+        // Suffix should match the job
+        let suffix = UuidSuffix::new(&id);
+        let resolved = queue.resolve_job_id(&suffix).await.expect("resolve failed");
+        assert_eq!(resolved, id);
+    }
+
+    #[tokio::test]
+    async fn resolve_job_id_not_found() {
+        let (queue, _db) = setup_db().await;
+
+        // Non-matching suffix should fail
+        let suffix: UuidSuffix = "0000000".parse().expect("valid suffix");
+        let result = queue.resolve_job_id(&suffix).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::ResolveIdError::NotFound(_))
+        ));
     }
 }

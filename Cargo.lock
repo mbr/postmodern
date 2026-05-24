@@ -1304,6 +1304,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "uuid-suffix",
 ]
 
 [[package]]
@@ -1322,6 +1323,7 @@ dependencies = [
  "terminal_size",
  "tokio",
  "uuid",
+ "uuid-suffix",
 ]
 
 [[package]]
@@ -2316,6 +2318,16 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-suffix"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb7bbc3066c4bd5e922b773562ae8c1740be447359ce60cf91fa68fe8ee958a8"
+dependencies = [
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

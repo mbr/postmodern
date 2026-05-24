@@ -27,6 +27,7 @@ tabled = "0.17"
 terminal_size = "0.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid = { workspace = true }
+uuid-suffix = "0.1.2"
 postmodern = { version = "0.1.0", path = "../postmodern" }
 
 [dev-dependencies]

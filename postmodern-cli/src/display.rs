@@ -12,7 +12,6 @@ use tabled::{
     Table, Tabled,
 };
 use terminal_size::{terminal_size, Width as TermWidth};
-use uuid::Uuid;
 
 /// Queue row for display.
 #[derive(Debug, Tabled)]
@@ -28,9 +27,9 @@ pub struct QueueRow {
 /// Job row for display.
 #[derive(Debug, Tabled)]
 pub struct JobRow {
-    /// Job ID.
+    /// Short job ID (7 hex characters).
     #[tabled(rename = "ID")]
-    pub id: Uuid,
+    pub id: String,
     /// Queue name.
     #[tabled(rename = "Queue")]
     pub queue: String,
@@ -131,13 +130,13 @@ struct JobsLayout {
 }
 
 impl JobsLayout {
-    /// Wide layout: full UUID, full timestamp, natural column widths.
+    /// Wide layout: short ID, full timestamp, natural column widths.
     fn wide(term_width: usize, queue_natural: usize, status_natural: usize) -> Self {
-        // 19 overhead + 36 ID + 16 Created + queue + status + 7 retries + desc
-        let fixed = 19 + 36 + 16 + queue_natural + status_natural + 7;
+        // 19 overhead + 7 ID + 16 Created + queue + status + 7 retries + desc
+        let fixed = 19 + 7 + 16 + queue_natural + status_natural + 7;
         let desc = term_width.saturating_sub(1).saturating_sub(fixed).max(10);
         Self {
-            id: 36,
+            id: 7,
             queue: queue_natural,
             status: status_natural,
             retries: 7,
@@ -148,13 +147,13 @@ impl JobsLayout {
         }
     }
 
-    /// Medium layout: wrapped UUID/timestamp, minimum column widths, description fills remainder.
+    /// Medium layout: short ID, wrapped timestamp, minimum column widths.
     fn medium(term_width: usize) -> Self {
-        // 19 overhead + 18 ID + 10 Created + 3 queue + 3 status + 2 retries + desc
-        let fixed = 19 + 18 + 10 + 3 + 3 + 2;
+        // 19 overhead + 7 ID + 10 Created + 3 queue + 3 status + 2 retries + desc
+        let fixed = 19 + 7 + 10 + 3 + 3 + 2;
         let desc = term_width.saturating_sub(1).saturating_sub(fixed).max(10);
         Self {
-            id: 18,
+            id: 7,
             queue: 3,
             status: 3,
             retries: 2,
@@ -168,7 +167,7 @@ impl JobsLayout {
     /// Narrow layout: like medium but with minimal description width.
     fn narrow() -> Self {
         Self {
-            id: 18,
+            id: 7,
             queue: 3,
             status: 3,
             retries: 2,
@@ -268,14 +267,12 @@ pub fn show_jobs_table(rows: Vec<JobRow>) {
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::{render_jobs_table_styled, JobRow};
 
     fn fixture() -> Vec<JobRow> {
         vec![
             JobRow {
-                id: Uuid::parse_str("019e38a7-9c0f-72c3-9faf-68e039fdbdc6").expect("valid uuid"),
+                id: "9fdbdc6".to_string(),
                 queue: "ingest".to_string(),
                 status: "Pending".to_string(),
                 retry_count: 0,
@@ -283,7 +280,7 @@ mod tests {
                 description: "ingest new documents from source".to_string(),
             },
             JobRow {
-                id: Uuid::parse_str("019e38a8-1234-7def-abcd-123456789abc").expect("valid uuid"),
+                id: "6789abc".to_string(),
                 queue: "process".to_string(),
                 status: "InProgress".to_string(),
                 retry_count: 2,
@@ -291,7 +288,7 @@ mod tests {
                 description: "process batch".to_string(),
             },
             JobRow {
-                id: Uuid::parse_str("019e38a9-5678-7abc-def0-fedcba987654").expect("valid uuid"),
+                id: "a987654".to_string(),
                 queue: "export".to_string(),
                 status: "Failed".to_string(),
                 retry_count: 5,
@@ -299,7 +296,7 @@ mod tests {
                 description: "export results to external API endpoint".to_string(),
             },
             JobRow {
-                id: Uuid::parse_str("019e38aa-9abc-7123-4567-abcdef012345").expect("valid uuid"),
+                id: "f012345".to_string(),
                 queue: "notify".to_string(),
                 status: "Finished".to_string(),
                 retry_count: 0,

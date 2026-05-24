@@ -10,12 +10,19 @@ use futures::StreamExt;
 use postmodern::{EnqueueOptions, JobDetails, JobFilter, Queue};
 use rmpv::Value;
 use serde::Serialize;
+use uuid::Uuid;
+use uuid_suffix::UuidSuffix;
 
 use crate::{
     cli::JobCommand,
     display::{show_jobs_table, JobRow},
     path, payload,
 };
+
+/// Returns a short representation of a UUID (7 hex characters).
+fn short_id(id: Uuid) -> String {
+    UuidSuffix::new(&id).to_string()
+}
 
 /// Job representation for YAML output.
 #[derive(Serialize)]
@@ -59,7 +66,7 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
                 let rows: Vec<JobRow> = jobs
                     .into_iter()
                     .map(|j| JobRow {
-                        id: j.id,
+                        id: short_id(j.id),
                         queue: j.queue,
                         status: format!("{:?}", j.status),
                         retry_count: j.retry_count,
@@ -72,11 +79,15 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
         }
 
         JobCommand::Show { id } => {
+            let resolved = queue
+                .resolve_job_id(&id)
+                .await
+                .context("resolving job ID")?;
             let job = queue
-                .get_job(id)
+                .get_job(resolved)
                 .await
                 .context("failed to get job")?
-                .ok_or_else(|| anyhow::anyhow!("job {id} not found"))?;
+                .ok_or_else(|| anyhow::anyhow!("job {} not found", short_id(resolved)))?;
 
             print_job_details(queue, &job).await?;
         }
@@ -104,31 +115,48 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
         }
 
         JobCommand::Move { id, to } => {
+            let resolved = queue
+                .resolve_job_ids(&id)
+                .await
+                .context("resolving job IDs")?;
             let count = queue
-                .move_jobs(&id, &to)
+                .move_jobs(&resolved, &to)
                 .await
                 .context("failed to move jobs")?;
             println!("Moved {count} job(s) to queue '{to}'.");
         }
 
         JobCommand::Copy { id, to } => {
+            let resolved = queue
+                .resolve_job_id(&id)
+                .await
+                .context("resolving job ID")?;
             let new_id = queue
-                .copy_job(id, &to, EnqueueOptions::default())
+                .copy_job(resolved, &to, EnqueueOptions::default())
                 .await
                 .context("failed to copy job")?;
-            println!("Copied job {id} to queue '{to}' as {new_id}.");
+            println!(
+                "Copied job {} to queue '{to}' as {}.",
+                short_id(resolved),
+                short_id(new_id)
+            );
         }
 
         JobCommand::Restart { id, force } => {
+            let resolved = queue
+                .resolve_job_ids(&id)
+                .await
+                .context("resolving job IDs")?;
             let count = queue
-                .restart_jobs(&id, force)
+                .restart_jobs(&resolved, force)
                 .await
                 .context("failed to restart jobs")?;
 
             if count == 0 && !force {
                 // Check if any jobs are in_progress
                 let in_progress: Vec<_> = futures::future::join_all(
-                    id.iter()
+                    resolved
+                        .iter()
                         .map(|&job_id| async move { queue.get_job(job_id).await.ok().flatten() }),
                 )
                 .await
@@ -138,7 +166,7 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
                 .collect();
 
                 if !in_progress.is_empty() {
-                    let ids: Vec<_> = in_progress.iter().map(|j| j.id.to_string()).collect();
+                    let ids: Vec<_> = in_progress.iter().map(|j| short_id(j.id)).collect();
                     anyhow::bail!(
                         "job(s) {} in_progress (locked). Use --force to restart anyway.",
                         ids.join(", ")
@@ -150,24 +178,36 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
         }
 
         JobCommand::Delete { id } => {
+            let resolved = queue
+                .resolve_job_ids(&id)
+                .await
+                .context("resolving job IDs")?;
             let count = queue
-                .delete_jobs(&id)
+                .delete_jobs(&resolved)
                 .await
                 .context("failed to delete jobs")?;
             println!("Deleted {count} job(s).");
         }
 
         JobCommand::Fail { id, message } => {
+            let resolved = queue
+                .resolve_job_ids(&id)
+                .await
+                .context("resolving job IDs")?;
             let count = queue
-                .fail_jobs(&id, &message)
+                .fail_jobs(&resolved, &message)
                 .await
                 .context("failed to fail jobs")?;
             println!("Failed {count} job(s).");
         }
 
         JobCommand::Done { id } => {
+            let resolved = queue
+                .resolve_job_ids(&id)
+                .await
+                .context("resolving job IDs")?;
             let count = queue
-                .finish_jobs(&id)
+                .finish_jobs(&resolved)
                 .await
                 .context("failed to finish jobs")?;
             println!("Finished {count} job(s).");
@@ -251,7 +291,7 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
                 let rows: Vec<JobRow> = matches
                     .into_iter()
                     .map(|j| JobRow {
-                        id: j.id,
+                        id: short_id(j.id),
                         queue: j.queue,
                         status: format!("{:?}", j.status),
                         retry_count: j.retry_count,
@@ -264,11 +304,15 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
         }
 
         JobCommand::Get { path: path_str, id } => {
+            let resolved = queue
+                .resolve_job_id(&id)
+                .await
+                .context("resolving job ID")?;
             let payload_bytes = queue
-                .get_job_payload(id)
+                .get_job_payload(resolved)
                 .await
                 .context("failed to get payload")?
-                .ok_or_else(|| anyhow::anyhow!("job {id} has no payload"))?;
+                .ok_or_else(|| anyhow::anyhow!("job {} has no payload", short_id(resolved)))?;
 
             let payload =
                 payload::from_msgpack(&payload_bytes).context("failed to decode payload")?;

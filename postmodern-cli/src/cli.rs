@@ -2,7 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use postmodern::job::JobStatus;
-use uuid::Uuid;
+use uuid_suffix::UuidSuffix;
 
 /// Postgres-backed job queue CLI.
 #[derive(Debug, Parser)]
@@ -89,8 +89,8 @@ pub enum JobCommand {
     },
     /// Show details about a specific job.
     Show {
-        /// Job ID.
-        id: Uuid,
+        /// Job ID or suffix.
+        id: UuidSuffix,
     },
     /// Get the next pending job from a queue.
     Next {
@@ -105,45 +105,45 @@ pub enum JobCommand {
     },
     /// Move jobs to a different queue.
     Move {
-        /// Job IDs to move.
-        id: Vec<Uuid>,
+        /// Job IDs or suffixes.
+        id: Vec<UuidSuffix>,
         /// Target queue.
         #[arg(long, short = 't')]
         to: String,
     },
     /// Copy a job to a different queue.
     Copy {
-        /// Job ID to copy.
-        id: Uuid,
+        /// Job ID or suffix.
+        id: UuidSuffix,
         /// Target queue.
         #[arg(long, short = 't')]
         to: String,
     },
     /// Restart jobs (reset to pending).
     Restart {
-        /// Job IDs to restart.
-        id: Vec<Uuid>,
+        /// Job IDs or suffixes.
+        id: Vec<UuidSuffix>,
         /// Force restart even if job is in_progress (breaks lock).
         #[arg(long)]
         force: bool,
     },
     /// Delete jobs.
     Delete {
-        /// Job IDs to delete.
-        id: Vec<Uuid>,
+        /// Job IDs or suffixes.
+        id: Vec<UuidSuffix>,
     },
     /// Hard fail jobs.
     Fail {
-        /// Job IDs to fail.
-        id: Vec<Uuid>,
+        /// Job IDs or suffixes.
+        id: Vec<UuidSuffix>,
         /// Error message.
         #[arg(long, short)]
         message: String,
     },
     /// Mark jobs as finished.
     Done {
-        /// Job IDs to mark as finished.
-        id: Vec<Uuid>,
+        /// Job IDs or suffixes.
+        id: Vec<UuidSuffix>,
     },
     /// Search job payloads for a pattern.
     Search {
@@ -163,8 +163,8 @@ pub enum JobCommand {
     Get {
         /// Path to the value (e.g., `items[0].pdf`).
         path: String,
-        /// Job ID.
-        id: Uuid,
+        /// Job ID or suffix.
+        id: UuidSuffix,
     },
 }
 
