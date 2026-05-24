@@ -3,6 +3,12 @@ name = "xpq-cli"
 description = "CLI for xpq job queue management."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["postgres", "job-queue", "cli", "database"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
 name = "xpq"
@@ -19,7 +25,7 @@ tabled = "0.17"
 terminal_size = "0.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid = { workspace = true }
-xpq = { path = "../xpq" }
+xpq = { version = "0.1.0", path = "../xpq" }
 
 [dev-dependencies]
 insta = "=1.43.2"

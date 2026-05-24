@@ -3,6 +3,12 @@ name = "xpq"
 description = "Postgres-backed job queue with transaction-based locking."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["postgres", "job-queue", "async", "background-jobs", "sqlx"]
+categories = ["asynchronous", "database"]
 
 [dependencies]
 anyhow = { workspace = true }
