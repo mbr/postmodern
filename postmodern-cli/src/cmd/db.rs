@@ -1,7 +1,7 @@
 //! Database statistics and maintenance commands.
 
 use anyhow::{Context, Result};
-use xpq::Queue;
+use postmodern::Queue;
 
 use crate::{
     cli::DbCommand,

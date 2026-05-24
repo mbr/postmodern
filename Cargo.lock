@@ -1278,6 +1278,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "postmodern"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "backon",
+ "chrono",
+ "dirs",
+ "futures",
+ "pgdb",
+ "rmp-serde",
+ "serde",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "postmodern-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "insta",
+ "postmodern",
+ "rmpv",
+ "serde",
+ "serde-saphyr",
+ "tabled",
+ "terminal_size",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,46 +2772,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xpq"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "backon",
- "chrono",
- "dirs",
- "futures",
- "pgdb",
- "rmp-serde",
- "serde",
- "sha2",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "xpq-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures",
- "insta",
- "rmpv",
- "serde",
- "serde-saphyr",
- "tabled",
- "terminal_size",
- "tokio",
- "uuid",
- "xpq",
-]
 
 [[package]]
 name = "yoke"

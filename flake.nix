@@ -50,7 +50,7 @@
         packages.default = platform.buildRustPackage (
           rustEnv
           // rec {
-            pname = "xpq";
+            pname = "pm";
             version = cargoToml.workspace.package.version;
             description = "Postgres-backed job queue with transaction-based locking";
             nativeBuildInputs = with pkgs; [ llvmPackages.bintools ];

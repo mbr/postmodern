@@ -1,7 +1,7 @@
-//! Configuration loading for xpq.
+//! Configuration loading for postmodern.
 //!
 //! Loads database connection settings from a TOML config file at
-//! `$XDG_CONFIG_HOME/xpq/config.toml` (typically `~/.config/xpq/config.toml`).
+//! `$XDG_CONFIG_HOME/postmodern/config.toml` (typically `~/.config/postmodern/config.toml`).
 
 use std::{fs, path::PathBuf};
 
@@ -31,7 +31,7 @@ pub enum ConfigError {
 
 /// Returns the path to the config file.
 pub fn config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|p| p.join("xpq").join("config.toml"))
+    dirs::config_dir().map(|p| p.join("postmodern").join("config.toml"))
 }
 
 /// Loads configuration from the config file.

@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use postmodern::{EnqueueOptions, JobDetails, JobFilter, Queue};
 use rmpv::Value;
 use serde::Serialize;
-use xpq::{EnqueueOptions, JobDetails, JobFilter, Queue};
 
 use crate::{
     cli::JobCommand,
@@ -134,7 +134,7 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
                 .await
                 .into_iter()
                 .flatten()
-                .filter(|j| j.status == xpq::job::JobStatus::InProgress)
+                .filter(|j| j.status == postmodern::job::JobStatus::InProgress)
                 .collect();
 
                 if !in_progress.is_empty() {

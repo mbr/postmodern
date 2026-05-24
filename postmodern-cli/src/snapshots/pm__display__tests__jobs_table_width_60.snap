@@ -1,6 +1,6 @@
 ---
-source: xpq-cli/src/display.rs
-expression: "render_jobs_table(fixture(), 60)"
+source: postmodern-cli/src/display.rs
+expression: "render_jobs_table_styled(fixture(), 60, true)"
 ---
 ┌────────────────────┬─────┬─────┬────┬────────────┬───────┐
 │ ID                 │ Que │ Sta │ Re │ Created    │ Descr │

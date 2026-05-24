@@ -1,8 +1,8 @@
 //! CLI argument parsing.
 
 use clap::{Parser, Subcommand};
+use postmodern::job::JobStatus;
 use uuid::Uuid;
-use xpq::job::JobStatus;
 
 /// Postgres-backed job queue CLI.
 #[derive(Debug, Parser)]

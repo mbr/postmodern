@@ -1,4 +1,4 @@
-//! CLI for xpq job queue management.
+//! CLI for postmodern job queue management.
 
 mod cli;
 mod cmd;
@@ -8,7 +8,7 @@ mod payload;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use xpq::{config, Queue};
+use postmodern::{config, Queue};
 
 use crate::cli::{Cli, Command};
 

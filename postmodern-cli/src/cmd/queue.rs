@@ -1,7 +1,7 @@
 //! Queue management commands.
 
 use anyhow::{Context, Result};
-use xpq::Queue;
+use postmodern::Queue;
 
 use crate::{
     cli::QueueCommand,

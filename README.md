@@ -1,13 +1,13 @@
-# xpq: Postgres-backed job queue
+# postmodern: Postgres-backed job queue
 
-`xpq` is a Postgres job queue. There are many like it, but this one is mine. Use it for ~~fun~~ small to medium projects where you can get away with [Just Use Postgres](https://www.manning.com/books/just-use-postgres) (now a book, apparently).
+`postmodern` is a Postgres job queue. There are many like it, but this one is mine. Use it for ~~fun~~ small to medium projects where you can get away with [Just Use Postgres](https://www.manning.com/books/just-use-postgres) (now a book, apparently).
 
 Push jobs onto queues, pull them off, acknowledge when done. Failed jobs retry with backoff; crashed workers get reaped.
 
 The CLI lets you inspect jobs directly:
 
 ```console
-$ xpq job ls -q ingest
+$ pm job ls -q ingest
 ┌────────────────────┬─────┬─────┬────┬────────────┬────────────────────────────────────┐
 │ ID                 │ Que │ Sta │ Re │ Created    │ Description                        │
 │                    │ ue  │ tus │ tr │            │                                    │
@@ -20,7 +20,7 @@ $ xpq job ls -q ingest
 ├────────────────────┼─────┼─────┼────┼────────────┼────────────────────────────────────┤
 ...
 
-$ xpq job show 019e5463-fa5b-7910-bc25-26c55139e9c6
+$ pm job show 019e5463-fa5b-7910-bc25-26c55139e9c6
 id: 019e5463-fa5b-7910-bc25-26c55139e9c6
 queue: ingest
 status: Finished
@@ -49,17 +49,17 @@ payload:
 
 Something that might suit your project even better:
 
-* [`pgmq`](https://docs.rs/pgmq) is an SQS-style message queue with visibility timeouts and archive/replay. `xpq` is a job queue with explicit status lifecycle, built-in retry/backoff, priority, and a CLI for operations.
-* [`sqlxmq`](https://docs.rs/sqlxmq) uses `#[job]` macros and a registry to define tasks. `xpq` takes the opposite approach: jobs are plain serde types with no macros, traits, or registration required.
-* [`graphile-worker`](https://crates.io/crates/graphile-worker) is a feature-rich framework: implement `TaskHandler` on your types, register them with `.define_job::<T>()`, and the worker calls your `run()` method with all the bells and whistles. `xpq` is a library, not a framework: jobs are plain serde types, you write your own processing loop, and there's less to learn.
-* [`background-jobs`](https://docs.rs/background-jobs) integrates with Actix-web, supports pluggable storage backends, and provides per-job-type retry configuration via the `Job` trait. `xpq` is framework-agnostic with no special traits; any serde type is a job.
+* [`pgmq`](https://docs.rs/pgmq) is an SQS-style message queue with visibility timeouts and archive/replay. `postmodern` is a job queue with explicit status lifecycle, built-in retry/backoff, priority, and a CLI for operations.
+* [`sqlxmq`](https://docs.rs/sqlxmq) uses `#[job]` macros and a registry to define tasks. `postmodern` takes the opposite approach: jobs are plain serde types with no macros, traits, or registration required.
+* [`graphile-worker`](https://crates.io/crates/graphile-worker) is a feature-rich framework: implement `TaskHandler` on your types, register them with `.define_job::<T>()`, and the worker calls your `run()` method with all the bells and whistles. `postmodern` is a library, not a framework: jobs are plain serde types, you write your own processing loop, and there's less to learn.
+* [`background-jobs`](https://docs.rs/background-jobs) integrates with Actix-web, supports pluggable storage backends, and provides per-job-type retry configuration via the `Job` trait. `postmodern` is framework-agnostic with no special traits; any serde type is a job.
 
 ## Usage
 
 Example code you can fit on the back of a postcard:
 
 ```rust,no_run
-use xpq::{Queue, EnqueueOptions};
+use postmodern::{Queue, EnqueueOptions};
 use futures::StreamExt;
 use std::pin::pin;
 # type MyPayload = String;
@@ -95,7 +95,7 @@ This is enough to schedule a job and also contains the code to implement a custo
 Queues must be created before enqueueing jobs. A queue can be paused to prevent new jobs from being processed; existing pending jobs transition to `Paused` and new jobs inherit that state by default.
 
 ```rust,no_run
-# use xpq::Queue;
+# use postmodern::Queue;
 # async fn example(queue: &Queue) -> Result<(), Box<dyn std::error::Error>> {
 queue.create_queue("tasks", false).await?;  // Returns true if created
 queue.pause_queue("tasks").await?;          // Returns count of paused jobs
@@ -111,7 +111,7 @@ The `EnqueueOptions::initial_state` field controls whether jobs start as `Pendin
 Beyond streaming, jobs can be fetched by ID, listed, moved, or copied:
 
 ```rust,no_run
-# use xpq::{Queue, EnqueueOptions};
+# use postmodern::{Queue, EnqueueOptions};
 # use uuid::Uuid;
 # type T = String;
 # async fn example(queue: &Queue, id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
@@ -135,7 +135,7 @@ let new_id = queue.copy_job(id, "other-queue", EnqueueOptions::default()).await?
 For jobs exceeding `LOCK_DURATION`, call `refresh_lock()` periodically to prevent reaping:
 
 ```rust,no_run
-# use xpq::job::PendingJob;
+# use postmodern::job::PendingJob;
 # async fn example(job: PendingJob<String>) -> Result<(), Box<dyn std::error::Error>> {
 let (payload, mut ack) = job.into_parts();
 loop {
@@ -157,7 +157,7 @@ Soft failures trigger exponential backoff: immediate retry on first failure, the
 Jobs stuck in `in_progress` (e.g., after worker crash) must be reaped. The reaper soft-fails expired jobs, respecting retry limits:
 
 ```rust,no_run
-# use xpq::Queue;
+# use postmodern::Queue;
 # async fn example(queue: &Queue) -> Result<(), Box<dyn std::error::Error>> {
 // Run once
 let (reaped_count, next_expiry) = queue.reap().await?;
@@ -171,7 +171,7 @@ The reaper wakes at most every 10 minutes, or earlier if a lock is about to expi
 
 ## CLI
 
-The `xpq` binary provides queue and job management commands. Configure the database URL in `~/.config/xpq/config.toml`:
+The `pm` binary provides queue and job management commands. Configure the database URL in `~/.config/postmodern/config.toml`:
 
 ```toml
 database_url = "postgres://..."
@@ -181,35 +181,35 @@ Or pass `--db` on each invocation.
 
 ### Queue management
 
-- `xpq queue ls`: List all queues
-- `xpq queue create <name> [--paused]`: Create a queue
-- `xpq queue delete <name>`: Delete a queue and all its jobs
-- `xpq queue pause <name>`: Pause a queue
-- `xpq queue resume <name>`: Resume a queue
+- `pm queue ls`: List all queues
+- `pm queue create <name> [--paused]`: Create a queue
+- `pm queue delete <name>`: Delete a queue and all its jobs
+- `pm queue pause <name>`: Pause a queue
+- `pm queue resume <name>`: Resume a queue
 
 ### Job operations
 
-- `xpq job ls [-q queue] [-s status] [-l limit]`: List jobs (status: `pending`, `paused`, `in-progress`, `finished`, `failed`)
-- `xpq job show <id>`: Show job details
-- `xpq job next <queue> [--peek] [--ack]`: Get next job from queue (locks it by default; `--peek` releases back to pending, `--ack` marks finished)
-- `xpq job move <id>... -t <queue>`: Move jobs to another queue
-- `xpq job copy <id> -t <queue>`: Copy a job to another queue
-- `xpq job restart <id>... [--force]`: Restart jobs (reset to pending; `--force` breaks in_progress locks)
-- `xpq job delete <id>...`: Delete jobs
-- `xpq job fail <id>... -m <message>`: Hard fail jobs with error message
-- `xpq job done <id>...`: Mark pending/in-progress jobs as finished
-- `xpq job search [-q queue] [-s status] <pattern>`: Search payloads (aborts at 50MB, use `--no-limit` to override)
-- `xpq job get <path> <id>`: Extract value from payload (e.g., `items[0].pdf`)
+- `pm job ls [-q queue] [-s status] [-l limit]`: List jobs (status: `pending`, `paused`, `in-progress`, `finished`, `failed`)
+- `pm job show <id>`: Show job details
+- `pm job next <queue> [--peek] [--ack]`: Get next job from queue (locks it by default; `--peek` releases back to pending, `--ack` marks finished)
+- `pm job move <id>... -t <queue>`: Move jobs to another queue
+- `pm job copy <id> -t <queue>`: Copy a job to another queue
+- `pm job restart <id>... [--force]`: Restart jobs (reset to pending; `--force` breaks in_progress locks)
+- `pm job delete <id>...`: Delete jobs
+- `pm job fail <id>... -m <message>`: Hard fail jobs with error message
+- `pm job done <id>...`: Mark pending/in-progress jobs as finished
+- `pm job search [-q queue] [-s status] <pattern>`: Search payloads (aborts at 50MB, use `--no-limit` to override)
+- `pm job get <path> <id>`: Extract value from payload (e.g., `items[0].pdf`)
 
 ### Database maintenance
 
-- `xpq db stats`: Show queue statistics
-- `xpq db reap`: Run the reaper once
+- `pm db stats`: Show queue statistics
+- `pm db reap`: Run the reaper once
 
 ### PostgreSQL backup/restore
 
-- `xpq pg backup`: Backup database using pg_dump (writes to stdout)
-- `xpq pg restore`: Restore database using pg_restore (reads from stdin)
+- `pm pg backup`: Backup database using pg_dump (writes to stdout)
+- `pm pg restore`: Restore database using pg_restore (reads from stdin)
 
 ## Limitations aka future features
 
@@ -218,4 +218,4 @@ Or pass `--db` on each invocation.
 - **LISTEN/NOTIFY**: use Postgres notifications for lower-latency job delivery instead of polling
 - **Configurable settings**: lock duration, retry limits, and backoff parameters are currently hardcoded with sane defaults
 - **Automatic pruning**: finished jobs must be deleted explicitly; no built-in retention policy yet
-- **Standalone reaper**: a long-running `xpq reap` command that can be deployed separately instead of scheduling the reaper in your application
+- **Standalone reaper**: a long-running `pm reap` command that can be deployed separately instead of scheduling the reaper in your application
