@@ -5,9 +5,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 authors.workspace = true
 readme = "README.md"
-documentation = "https://docs.rs/postmodern"
 keywords = ["postgres", "job-queue", "async", "background-jobs", "sqlx"]
 categories = ["asynchronous", "database"]
 
