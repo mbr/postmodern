@@ -1285,7 +1285,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "postmodern"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "postmodern-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
