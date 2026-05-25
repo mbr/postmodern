@@ -53,7 +53,10 @@
             pname = "pm";
             version = cargoToml.workspace.package.version;
             description = "Postgres-backed job queue with transaction-based locking";
-            nativeBuildInputs = with pkgs; [ llvmPackages.bintools postgresql ];
+            nativeBuildInputs = with pkgs; [
+              llvmPackages.bintools
+              postgresql
+            ];
 
             src = pkgs.lib.cleanSource ./.;
 
