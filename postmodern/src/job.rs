@@ -110,11 +110,15 @@ impl<T> PendingJob<T> {
     /// [`DisplayFullErrorExt::to_string_full`](https://docs.rs/display-full-error) to
     /// capture the chain:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use postmodern::job::PendingJob;
     /// use display_full_error::DisplayFullErrorExt;
     /// use futures::TryFutureExt;
     ///
-    /// job.run(|payload| do_work(payload).map_err(|e| e.to_string_full())).await
+    /// # async fn do_work(_: ()) -> Result<(), std::io::Error> { Ok(()) }
+    /// # async fn example(job: PendingJob<()>) {
+    /// let _ = job.run(|payload| do_work(payload).map_err(|e| e.to_string_full())).await;
+    /// # }
     /// ```
     pub async fn run<F, Fut, R, E>(self, f: F) -> Result<R, JobAckError<R, E>>
     where
