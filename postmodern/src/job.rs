@@ -1,9 +1,8 @@
 //! Job types and acknowledgment handles.
 
-use std::{future::Future, time::Duration};
+use std::{fmt::Display, future::Future, time::Duration};
 
 use chrono::{DateTime, Utc};
-use display_full_error::DisplayFullErrorExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -101,12 +100,27 @@ impl<T> PendingJob<T> {
     /// Runs a function with the payload and acknowledges the job based on its result.
     ///
     /// On success, commits the job and returns the value. On failure, marks the job for retry
-    /// with the error message and returns the error.
+    /// with the error message (using alternate `Display` formatting) and returns the error.
+    ///
+    /// # Error formatting
+    ///
+    /// The error is stored in the database using `{:#}` (alternate `Display`). For
+    /// [`anyhow::Error`](https://docs.rs/anyhow), this includes the full causal chain.
+    /// For [`std::error::Error`] types, use
+    /// [`DisplayFullErrorExt::to_string_full`](https://docs.rs/display-full-error) to
+    /// capture the chain:
+    ///
+    /// ```ignore
+    /// use display_full_error::DisplayFullErrorExt;
+    /// use futures::TryFutureExt;
+    ///
+    /// job.run(|payload| do_work(payload).map_err(|e| e.to_string_full())).await
+    /// ```
     pub async fn run<F, Fut, R, E>(self, f: F) -> Result<R, JobAckError<R, E>>
     where
         F: FnOnce(T) -> Fut,
         Fut: Future<Output = Result<R, E>>,
-        E: std::error::Error,
+        E: Display,
     {
         let (payload, ack) = self.into_parts();
         ack.run(f(payload)).await
@@ -215,18 +229,20 @@ impl JobAck {
     /// Runs a future and acknowledges the job based on its result.
     ///
     /// On success, commits the job and returns the value. On failure, marks the job for retry
-    /// with the error message and returns the error.
+    /// with the error message (using alternate `Display` formatting) and returns the error.
+    ///
+    /// See [`PendingJob::run`] for details on error formatting.
     pub async fn run<Fut, T, E>(self, fut: Fut) -> Result<T, JobAckError<T, E>>
     where
         Fut: Future<Output = Result<T, E>>,
-        E: std::error::Error,
+        E: Display,
     {
         match fut.await {
             Ok(value) => match self.commit().await {
                 Ok(()) => Ok(value),
                 Err(e) => Err(JobAckError::FailedToCommit(value, e)),
             },
-            Err(e) => match self.soft_fail(&e.to_string_full()).await {
+            Err(e) => match self.soft_fail(&format!("{:#}", e)).await {
                 Ok(()) => Err(JobAckError::RunError(e)),
                 Err(ack_err) => Err(JobAckError::SoftFailError {
                     error: e,
