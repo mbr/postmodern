@@ -82,5 +82,46 @@
           }
         );
       }
-    );
+    )
+    // {
+      nixosModules.default =
+        {
+          config,
+          lib,
+          pkgs,
+          ...
+        }:
+        let
+          cfg = config.services.postmodern;
+        in
+        {
+          options.services.postmodern = {
+            enable = lib.mkEnableOption "postmodern job queue";
+
+            database = {
+              createLocally = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = "Whether to create the database locally.";
+              };
+
+              name = lib.mkOption {
+                type = lib.types.str;
+                default = "postmodern";
+                description = "Name of the PostgreSQL database.";
+              };
+
+              allowedUsers = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                description = "PostgreSQL roles granted access to the postmodern database.";
+              };
+            };
+          };
+
+          config = lib.mkIf cfg.enable {
+            # TODO: implement service
+          };
+        };
+    };
 }
