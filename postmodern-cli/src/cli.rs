@@ -103,22 +103,6 @@ pub enum JobCommand {
         #[arg(long, conflicts_with = "peek")]
         ack: bool,
     },
-    /// Move jobs to a different queue.
-    Move {
-        /// Job IDs or suffixes.
-        id: Vec<UuidSuffix>,
-        /// Target queue.
-        #[arg(long, short = 't')]
-        to: String,
-    },
-    /// Copy a job to a different queue.
-    Copy {
-        /// Job ID or suffix.
-        id: UuidSuffix,
-        /// Target queue.
-        #[arg(long, short = 't')]
-        to: String,
-    },
     /// Restart jobs (reset to pending).
     Restart {
         /// Job IDs or suffixes.

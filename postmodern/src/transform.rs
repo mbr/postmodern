@@ -168,8 +168,8 @@ mod tests {
     #[tokio::test]
     async fn handles_shared_payloads() {
         let (queue, _db) = setup_db().await;
-        queue.create_queue("other", false).await.unwrap();
 
+        // Enqueue same payload twice - they share the same payload via content deduplication
         let id1 = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
@@ -177,9 +177,10 @@ mod tests {
             .expect("unexpected duplicate");
 
         let id2 = queue
-            .copy_job(id1, "other", EnqueueOptions::default())
+            .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("copy failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let (refcount_before,): (i32,) = sqlx::query_as(
             "SELECT refcount FROM payloads WHERE hash = (SELECT payload_hash FROM jobs WHERE id = $1)",

@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use postmodern::{EnqueueOptions, JobDetails, JobFilter, Queue};
+use postmodern::{JobDetails, JobFilter, Queue};
 use rmpv::Value;
 use serde::Serialize;
 use uuid::Uuid;
@@ -114,34 +114,6 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
             } else {
                 job_ack.forget();
             }
-        }
-
-        JobCommand::Move { id, to } => {
-            let resolved = queue
-                .resolve_job_ids(&id)
-                .await
-                .context("resolving job IDs")?;
-            let count = queue
-                .move_jobs(&resolved, &to)
-                .await
-                .context("failed to move jobs")?;
-            println!("Moved {count} job(s) to queue '{to}'.");
-        }
-
-        JobCommand::Copy { id, to } => {
-            let resolved = queue
-                .resolve_job_id(&id)
-                .await
-                .context("resolving job ID")?;
-            let new_id = queue
-                .copy_job(resolved, &to, EnqueueOptions::default())
-                .await
-                .context("failed to copy job")?;
-            println!(
-                "Copied job {} to queue '{to}' as {}.",
-                short_id(resolved),
-                short_id(new_id)
-            );
         }
 
         JobCommand::Restart { id, force } => {

@@ -241,88 +241,6 @@ impl Queue {
             .transpose()
     }
 
-    /// Moves jobs to a different queue.
-    ///
-    /// Updates the jobs' queue field. Jobs retain their ID, status, and payload. Returns the
-    /// number of jobs moved. Returns [`ModifyError::QueueNotFound`] if the target queue does not
-    /// exist.
-    pub async fn move_jobs(&self, ids: &[Uuid], to_queue: &str) -> Result<u64, ModifyError> {
-        let mut tx = self.pool.begin().await.map_err(ModifyError::Database)?;
-
-        // Check queue exists
-        let exists: Option<(bool,)> = sqlx::query_as("SELECT true FROM queues WHERE queue = $1")
-            .bind(to_queue)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ModifyError::Database)?;
-        if exists.is_none() {
-            return Err(ModifyError::QueueNotFound);
-        }
-
-        let result = sqlx::query("UPDATE jobs SET queue = $1 WHERE id = ANY($2)")
-            .bind(to_queue)
-            .bind(ids)
-            .execute(&mut *tx)
-            .await
-            .map_err(ModifyError::Database)?;
-
-        tx.commit().await.map_err(ModifyError::Database)?;
-        Ok(result.rows_affected())
-    }
-
-    /// Copies a job to a different queue.
-    ///
-    /// Creates a new job referencing the same payload in the target queue. Returns the new job's
-    /// ID. The payload is not duplicated; its reference count is incremented.
-    /// Returns [`ModifyError::QueueNotFound`] if the target queue does not exist.
-    pub async fn copy_job(
-        &self,
-        id: Uuid,
-        to_queue: &str,
-        options: EnqueueOptions,
-    ) -> Result<Uuid, ModifyError> {
-        let new_id = Uuid::now_v7();
-
-        let status = self
-            .resolve_initial_state(to_queue, options.initial_state)
-            .await
-            .map_err(ModifyError::Database)?
-            .ok_or(ModifyError::QueueNotFound)?;
-
-        let mut tx = self.pool.begin().await.map_err(ModifyError::Database)?;
-
-        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT payload_hash FROM jobs WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ModifyError::Database)?;
-
-        let (payload_hash,) = row.ok_or(ModifyError::NotFound)?;
-
-        sqlx::query("UPDATE payloads SET refcount = refcount + 1 WHERE hash = $1")
-            .bind(&payload_hash)
-            .execute(&mut *tx)
-            .await
-            .map_err(ModifyError::Database)?;
-
-        sqlx::query(
-            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority, key) \
-             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
-        )
-        .bind(new_id)
-        .bind(to_queue)
-        .bind(status)
-        .bind(&options.description)
-        .bind(&payload_hash)
-        .bind(options.priority)
-        .execute(&mut *tx)
-        .await
-        .map_err(ModifyError::Database)?;
-
-        tx.commit().await.map_err(ModifyError::Database)?;
-        Ok(new_id)
-    }
-
     /// Returns a reference to the underlying connection pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
@@ -1206,32 +1124,6 @@ mod tests {
             .await
             .expect("fetch failed")
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn move_and_copy_job() {
-        let (queue, _db) = setup_db().await;
-
-        queue.create_queue("source", false).await.unwrap();
-        queue.create_queue("moved", false).await.unwrap();
-        queue.create_queue("copied", false).await.unwrap();
-
-        let id = queue
-            .enqueue("source", "payload".to_string(), EnqueueOptions::default())
-            .await
-            .expect("enqueue failed")
-            .expect("unexpected duplicate");
-
-        queue.move_jobs(&[id], "moved").await.expect("move failed");
-        assert!(queue.list_pending("source").await.unwrap().is_empty());
-        assert_eq!(queue.list_pending("moved").await.unwrap().len(), 1);
-
-        let copy_id = queue
-            .copy_job(id, "copied", EnqueueOptions::default())
-            .await
-            .expect("copy failed");
-        assert_ne!(id, copy_id);
-        assert_eq!(queue.list_pending("copied").await.unwrap().len(), 1);
     }
 
     #[tokio::test]

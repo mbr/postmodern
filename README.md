@@ -40,7 +40,7 @@ payload:
 ## Five reasons to use it
 
 * **No magic**: jobs are plain serde types, no macros, no traits, no worker pool. Call `enqueue()` and `try_stream_jobs()` and process with standard async Rust.
-* **CLI tooling**: list, search, inspect, move, copy, restart, and fail jobs without writing code. If your payload implements `Deserialize`, you can inspect it.
+* **CLI tooling**: list, search, inspect, restart, and fail jobs without writing code. If your payload implements `Deserialize`, you can inspect it.
 * **Jobs, not notifications**: explicit lifecycle with `soft_fail()` (retry with backoff) and `hard_fail()`.
 * **Operational control**: pause queues for maintenance or backpressure; refresh locks for jobs that run longer than the default 20-minute lease.
 * **Durable by design**: Rust's type system enforces acknowledgment via `JobAck`; the reaper and retry logic handle crashes and transient errors. As long as Postgres lives, every job eventually finishes or hard-fails.
@@ -120,12 +120,6 @@ let job = queue.fetch_job::<T>(id).await?;
 
 // List pending jobs (metadata only, no payload)
 let jobs = queue.list_pending("tasks").await?;
-
-// Move job to another queue (same payload, same ID)
-queue.move_jobs(&[id], "other-queue").await?;
-
-// Copy job to another queue (new ID, shared payload via refcount)
-let new_id = queue.copy_job(id, "other-queue", EnqueueOptions::default()).await?;
 # Ok(())
 # }
 ```
@@ -192,8 +186,6 @@ Or pass `--db` on each invocation.
 - `pm job ls [-q queue] [-s status] [-l limit]`: List jobs (status: `pending`, `paused`, `in-progress`, `finished`, `failed`)
 - `pm job show <id>`: Show job details
 - `pm job next <queue> [--peek] [--ack]`: Get next job from queue (locks it by default; `--peek` releases back to pending, `--ack` marks finished)
-- `pm job move <id>... -t <queue>`: Move jobs to another queue
-- `pm job copy <id> -t <queue>`: Copy a job to another queue
 - `pm job restart <id>... [--force]`: Restart jobs (reset to pending; `--force` breaks in_progress locks)
 - `pm job delete <id>...`: Delete jobs
 - `pm job fail <id>... -m <message>`: Hard fail jobs with error message
