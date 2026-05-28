@@ -115,7 +115,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let old_payload = queue
             .get_job_payload(id)
@@ -154,7 +155,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let result =
             transform_job_payload(queue.pool(), id, |_queue, payload| Ok(payload.to_vec()))
@@ -171,7 +173,8 @@ mod tests {
         let id1 = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let id2 = queue
             .copy_job(id1, "other", EnqueueOptions::default())

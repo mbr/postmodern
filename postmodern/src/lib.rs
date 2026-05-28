@@ -34,6 +34,8 @@ pub struct EnqueueOptions {
     pub description: Option<String>,
     /// Initial job state.
     pub initial_state: InitialState,
+    /// Deduplication key for idempotent enqueue.
+    pub key: Option<String>,
     /// Priority for ordering (higher = more urgent).
     pub priority: i64,
 }
@@ -60,6 +62,8 @@ pub struct JobDetails {
     pub description: Option<String>,
     /// When the job was created.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Deduplication key if set.
+    pub key: Option<String>,
     /// Lock timestamp.
     pub lock: Option<chrono::DateTime<chrono::Utc>>,
     /// Error message from last failure.
@@ -133,14 +137,15 @@ impl Queue {
 
     /// Enqueues a job with the given payload.
     ///
-    /// Returns the job's UUID (v7, time-ordered). Payloads are deduplicated by content hash.
+    /// Returns `Some(id)` with the job's UUID (v7, time-ordered) if created, or `None` if a job
+    /// with the same key already exists in this queue. Payloads are deduplicated by content hash.
     /// Returns [`EnqueueError::QueueNotFound`] if the queue does not exist.
     pub async fn enqueue<T: Serialize>(
         &self,
         queue: &str,
         payload: T,
         options: EnqueueOptions,
-    ) -> Result<Uuid, EnqueueError> {
+    ) -> Result<Option<Uuid>, EnqueueError> {
         let id = Uuid::now_v7();
         let payload_bytes = rmp_serde::to_vec_named(&payload).map_err(EnqueueError::Serialize)?;
         let hash = Sha256::digest(&payload_bytes);
@@ -163,9 +168,10 @@ impl Queue {
         .await
         .map_err(EnqueueError::Database)?;
 
-        sqlx::query(
-            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+        let result = sqlx::query(
+            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority, key) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (queue, key) WHERE key IS NOT NULL DO NOTHING",
         )
         .bind(id)
         .bind(queue)
@@ -173,12 +179,19 @@ impl Queue {
         .bind(&options.description)
         .bind(hash.as_slice())
         .bind(options.priority)
+        .bind(&options.key)
         .execute(&mut *tx)
         .await
         .map_err(EnqueueError::Database)?;
 
+        if result.rows_affected() == 0 {
+            // Duplicate key - rollback payload refcount increment.
+            tx.rollback().await.map_err(EnqueueError::Database)?;
+            return Ok(None);
+        }
+
         tx.commit().await.map_err(EnqueueError::Database)?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// Lists all pending jobs in the specified queue.
@@ -293,8 +306,8 @@ impl Queue {
             .map_err(ModifyError::Database)?;
 
         sqlx::query(
-            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority, key) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
         )
         .bind(new_id)
         .bind(to_queue)
@@ -508,8 +521,8 @@ impl Queue {
         match (filter.queue.as_deref(), filter.status) {
             (Some(queue), Some(status)) => {
                 sqlx::query_as(
-                    "SELECT id, queue, status, description, created_at, lock, error, retry_count, \
-                            priority \
+                    "SELECT id, queue, status, description, created_at, key, lock, error, \
+                            retry_count, priority \
                      FROM jobs WHERE queue = $1 AND status = $2 \
                      ORDER BY created_at DESC LIMIT $3",
                 )
@@ -521,8 +534,8 @@ impl Queue {
             }
             (Some(queue), None) => {
                 sqlx::query_as(
-                    "SELECT id, queue, status, description, created_at, lock, error, retry_count, \
-                            priority \
+                    "SELECT id, queue, status, description, created_at, key, lock, error, \
+                            retry_count, priority \
                      FROM jobs WHERE queue = $1 \
                      ORDER BY created_at DESC LIMIT $2",
                 )
@@ -533,8 +546,8 @@ impl Queue {
             }
             (None, Some(status)) => {
                 sqlx::query_as(
-                    "SELECT id, queue, status, description, created_at, lock, error, retry_count, \
-                            priority \
+                    "SELECT id, queue, status, description, created_at, key, lock, error, \
+                            retry_count, priority \
                      FROM jobs WHERE status = $1 \
                      ORDER BY created_at DESC LIMIT $2",
                 )
@@ -545,8 +558,8 @@ impl Queue {
             }
             (None, None) => {
                 sqlx::query_as(
-                    "SELECT id, queue, status, description, created_at, lock, error, retry_count, \
-                            priority \
+                    "SELECT id, queue, status, description, created_at, key, lock, error, \
+                            retry_count, priority \
                      FROM jobs ORDER BY created_at DESC LIMIT $1",
                 )
                 .bind(limit)
@@ -571,8 +584,8 @@ impl Queue {
 
         async_stream::try_stream! {
             // Build query based on filter - join with payloads
-            let base = "SELECT j.id, j.queue, j.status, j.description, j.created_at, j.lock, \
-                               j.error, j.retry_count, j.priority, p.data AS payload \
+            let base = "SELECT j.id, j.queue, j.status, j.description, j.created_at, j.key, \
+                               j.lock, j.error, j.retry_count, j.priority, p.data AS payload \
                         FROM jobs j JOIN payloads p ON p.hash = j.payload_hash";
 
             use futures::StreamExt;
@@ -630,10 +643,31 @@ impl Queue {
     /// Returns `None` if the job does not exist. Does not lock the job.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobDetails>, ListError> {
         sqlx::query_as(
-            "SELECT id, queue, status, description, created_at, lock, error, retry_count, priority \
+            "SELECT id, queue, status, description, created_at, key, lock, error, retry_count, \
+                    priority \
              FROM jobs WHERE id = $1",
         )
         .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(ListError::Query)
+    }
+
+    /// Gets a job by its deduplication key.
+    ///
+    /// Returns `None` if no job exists with this key in the queue.
+    pub async fn get_job_by_key(
+        &self,
+        queue: &str,
+        key: &str,
+    ) -> Result<Option<JobDetails>, ListError> {
+        sqlx::query_as(
+            "SELECT id, queue, status, description, created_at, key, lock, error, retry_count, \
+                    priority \
+             FROM jobs WHERE queue = $1 AND key = $2",
+        )
+        .bind(queue)
+        .bind(key)
         .fetch_optional(&self.pool)
         .await
         .map_err(ListError::Query)
@@ -714,10 +748,10 @@ impl Queue {
                  UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
                  FROM selected s \
                  WHERE j.id = s.id \
-                 RETURNING j.id, j.queue, j.status, j.description, j.created_at, j.lock, \
+                 RETURNING j.id, j.queue, j.status, j.description, j.created_at, j.key, j.lock, \
                            j.error, j.retry_count, j.priority, j.payload_hash \
              ) \
-             SELECT u.id, u.queue, u.status, u.description, u.created_at, u.lock, u.error, \
+             SELECT u.id, u.queue, u.status, u.description, u.created_at, u.key, u.lock, u.error, \
                     u.retry_count, u.priority, p.data AS payload \
              FROM updated u \
              JOIN payloads p ON p.hash = u.payload_hash",
@@ -734,6 +768,7 @@ impl Queue {
                 status: row.get("status"),
                 description: row.get("description"),
                 created_at: row.get("created_at"),
+                key: row.get("key"),
                 lock: row.get("lock"),
                 error: row.get("error"),
                 retry_count: row.get("retry_count"),
@@ -1061,6 +1096,7 @@ fn row_to_job_payload(row: PgRow) -> (JobDetails, Vec<u8>) {
         status: row.get("status"),
         description: row.get("description"),
         created_at: row.get("created_at"),
+        key: row.get("key"),
         lock: row.get("lock"),
         error: row.get("error"),
         retry_count: row.get("retry_count"),
@@ -1098,11 +1134,13 @@ mod tests {
         let id1 = queue
             .enqueue("test", 1i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
         let id2 = queue
             .enqueue("test", 2i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
 
@@ -1148,7 +1186,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let job = queue
             .fetch_job::<i32>(id)
@@ -1180,7 +1219,8 @@ mod tests {
         let id = queue
             .enqueue("source", "payload".to_string(), EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         queue.move_jobs(&[id], "moved").await.expect("move failed");
         assert!(queue.list_pending("source").await.unwrap().is_empty());
@@ -1215,7 +1255,8 @@ mod tests {
         let id1 = queue
             .enqueue("test", 1i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         // Pause the queue - should transition pending job to paused
         let paused_count = queue.pause_queue("test").await.expect("pause failed");
@@ -1232,7 +1273,8 @@ mod tests {
         let id2 = queue
             .enqueue("test", 2i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let (status,): (JobStatus,) = sqlx::query_as("SELECT status FROM jobs WHERE id = $1")
             .bind(id2)
@@ -1298,7 +1340,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         // Simulate an expired in-progress job by setting lock to the past
         let expired_lock = chrono::Utc::now()
@@ -1336,11 +1379,13 @@ mod tests {
         let id1 = queue
             .enqueue("test", 1i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
         let id2 = queue
             .enqueue("test", 2i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let ids = queue.list_job_ids("test").await.expect("list failed");
         assert_eq!(ids, vec![id1, id2]);
@@ -1359,7 +1404,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         // Full UUID resolves directly without DB lookup
         let suffix = UuidSuffix::full(&id);
@@ -1374,7 +1420,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         // Suffix should match the job
         let suffix = UuidSuffix::new(&id);
@@ -1393,5 +1440,70 @@ mod tests {
             result,
             Err(crate::error::ResolveIdError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn deduplication_key() {
+        let (queue, _db) = setup_db().await;
+        queue.create_queue("other", false).await.unwrap();
+
+        let opts_with_key = EnqueueOptions {
+            key: Some("my-key".to_string()),
+            ..Default::default()
+        };
+
+        // First enqueue succeeds
+        let id = queue
+            .enqueue("test", 42i32, opts_with_key.clone())
+            .await
+            .expect("enqueue failed")
+            .expect("first enqueue should succeed");
+
+        // Duplicate key returns None
+        let dup = queue
+            .enqueue("test", 99i32, opts_with_key.clone())
+            .await
+            .expect("enqueue failed");
+        assert!(dup.is_none());
+
+        // Same key in different queue succeeds
+        let other_id = queue
+            .enqueue("other", 42i32, opts_with_key)
+            .await
+            .expect("enqueue failed")
+            .expect("same key in different queue should succeed");
+        assert_ne!(id, other_id);
+
+        // get_job_by_key retrieves the job
+        let found = queue
+            .get_job_by_key("test", "my-key")
+            .await
+            .expect("query failed")
+            .expect("job should exist");
+        assert_eq!(found.id, id);
+        assert_eq!(found.key, Some("my-key".to_string()));
+
+        // get_job_by_key returns None for nonexistent key
+        let not_found = queue
+            .get_job_by_key("test", "nonexistent")
+            .await
+            .expect("query failed");
+        assert!(not_found.is_none());
+
+        // Delete job, re-enqueue with same key succeeds
+        queue.delete_jobs(&[id]).await.expect("delete failed");
+        let new_id = queue
+            .enqueue(
+                "test",
+                42i32,
+                EnqueueOptions {
+                    key: Some("my-key".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enqueue failed")
+            .expect("re-enqueue after delete should succeed");
+        assert_ne!(id, new_id);
     }
 }

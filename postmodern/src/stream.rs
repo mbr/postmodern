@@ -140,7 +140,8 @@ mod tests {
         let id = queue
             .enqueue("test", "hello".to_string(), EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let mut stream = pin!(queue.try_stream_jobs::<String>("test"));
         let job = stream.next().await.expect("no job").expect("fetch failed");
@@ -164,11 +165,13 @@ mod tests {
         let id1 = queue
             .enqueue("test", 1i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
         let id2 = queue
             .enqueue("test", 2i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let mut stream1 = pin!(queue.try_stream_jobs::<i32>("test"));
         let mut stream2 = pin!(queue.try_stream_jobs::<i32>("test"));
@@ -188,7 +191,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
         let job = stream.next().await.expect("no job").expect("fetch failed");
@@ -210,7 +214,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         {
             let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
@@ -251,7 +256,8 @@ mod tests {
         let id = queue
             .enqueue("test", 42i32, EnqueueOptions::default())
             .await
-            .expect("enqueue failed");
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
 
         sqlx::query("UPDATE jobs SET retry_count = $1 WHERE id = $2")
             .bind(MAX_RETRIES as i32)

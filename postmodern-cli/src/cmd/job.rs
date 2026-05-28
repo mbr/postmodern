@@ -38,6 +38,8 @@ struct JobYaml<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
     payload: Value,
 }
@@ -370,6 +372,7 @@ fn print_job_details_with_payload(job: &JobDetails, payload_bytes: &[u8]) {
         retries: job.retry_count,
         lock: job.lock.map(|l| l.format("%Y-%m-%d %H:%M:%S").to_string()),
         description: job.description.as_deref(),
+        key: job.key.as_deref(),
         error: job.error.as_deref(),
         payload: payload_value,
     };
