@@ -50,9 +50,6 @@ pub enum ModifyError {
     /// Database operation failed.
     #[error("database error")]
     Database(#[source] sqlx::Error),
-    /// Job not found.
-    #[error("job not found")]
-    NotFound,
     /// Queue does not exist.
     #[error("queue not found")]
     QueueNotFound,

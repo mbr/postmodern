@@ -21,7 +21,6 @@ display_full_error = { version = "1", features = ["alloc"] }
 futures = { workspace = true }
 rmp-serde = "1"
 serde = { workspace = true }
-sha2 = "0.10"
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "migrate"] }
 thiserror = "2"
 tokio = { workspace = true }

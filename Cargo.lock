@@ -1297,7 +1297,6 @@ dependencies = [
  "pgdb",
  "rmp-serde",
  "serde",
- "sha2",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

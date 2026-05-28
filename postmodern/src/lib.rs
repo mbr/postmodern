@@ -11,7 +11,6 @@ use std::time::Duration;
 use display_full_error::DisplayFullErrorExt;
 use futures::Stream;
 use serde::{de::DeserializeOwned, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, FromRow, PgPool, Row};
 pub use transform::TransformResult;
 use uuid::Uuid;
@@ -138,7 +137,7 @@ impl Queue {
     /// Enqueues a job with the given payload.
     ///
     /// Returns `Some(id)` with the job's UUID (v7, time-ordered) if created, or `None` if a job
-    /// with the same key already exists in this queue. Payloads are deduplicated by content hash.
+    /// with the same key already exists in this queue.
     /// Returns [`EnqueueError::QueueNotFound`] if the queue does not exist.
     pub async fn enqueue<T: Serialize>(
         &self,
@@ -148,7 +147,6 @@ impl Queue {
     ) -> Result<Option<Uuid>, EnqueueError> {
         let id = Uuid::now_v7();
         let payload_bytes = rmp_serde::to_vec_named(&payload).map_err(EnqueueError::Serialize)?;
-        let hash = Sha256::digest(&payload_bytes);
 
         let status = self
             .resolve_initial_state(queue, options.initial_state)
@@ -156,20 +154,8 @@ impl Queue {
             .map_err(EnqueueError::Database)?
             .ok_or(EnqueueError::QueueNotFound)?;
 
-        let mut tx = self.pool.begin().await.map_err(EnqueueError::Database)?;
-
-        sqlx::query(
-            "INSERT INTO payloads (hash, data, refcount) VALUES ($1, $2, 1) \
-             ON CONFLICT (hash) DO UPDATE SET refcount = payloads.refcount + 1",
-        )
-        .bind(hash.as_slice())
-        .bind(&payload_bytes)
-        .execute(&mut *tx)
-        .await
-        .map_err(EnqueueError::Database)?;
-
         let result = sqlx::query(
-            "INSERT INTO jobs (id, queue, status, description, payload_hash, priority, key) \
+            "INSERT INTO jobs (id, queue, status, description, payload, priority, key) \
              VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (queue, key) WHERE key IS NOT NULL DO NOTHING",
         )
@@ -177,20 +163,17 @@ impl Queue {
         .bind(queue)
         .bind(status)
         .bind(&options.description)
-        .bind(hash.as_slice())
+        .bind(&payload_bytes)
         .bind(options.priority)
         .bind(&options.key)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(EnqueueError::Database)?;
 
         if result.rows_affected() == 0 {
-            // Duplicate key - rollback payload refcount increment.
-            tx.rollback().await.map_err(EnqueueError::Database)?;
             return Ok(None);
         }
 
-        tx.commit().await.map_err(EnqueueError::Database)?;
         Ok(Some(id))
     }
 
@@ -221,15 +204,9 @@ impl Queue {
     ) -> Result<Option<PendingJob<T>>, FetchError> {
         let lock_token = Uuid::now_v7();
         let row: Option<PgRow> = sqlx::query(
-            "WITH updated AS ( \
-                 UPDATE jobs SET status = 'in_progress', lock = now(), lock_token = $2 \
-                 WHERE id = $1 AND status = 'pending' AND (lock IS NULL OR lock <= now()) \
-                 RETURNING id, queue, description, status, created_at, priority, payload_hash \
-             ) \
-             SELECT u.id, u.queue, u.description, u.status, u.created_at, u.priority, \
-                    p.data AS payload \
-             FROM updated u \
-             JOIN payloads p ON p.hash = u.payload_hash",
+            "UPDATE jobs SET status = 'in_progress', lock = now(), lock_token = $2 \
+             WHERE id = $1 AND status = 'pending' AND (lock IS NULL OR lock <= now()) \
+             RETURNING id, queue, description, status, created_at, priority, payload",
         )
         .bind(id)
         .bind(lock_token)
@@ -501,17 +478,15 @@ impl Queue {
         let limit = filter.limit.max(1) as i64;
 
         async_stream::try_stream! {
-            // Build query based on filter - join with payloads
-            let base = "SELECT j.id, j.queue, j.status, j.description, j.created_at, j.key, \
-                               j.lock, j.error, j.retry_count, j.priority, p.data AS payload \
-                        FROM jobs j JOIN payloads p ON p.hash = j.payload_hash";
+            let base = "SELECT id, queue, status, description, created_at, key, \
+                               lock, error, retry_count, priority, payload FROM jobs";
 
             use futures::StreamExt;
 
             match (filter.queue.as_deref(), filter.status) {
                 (Some(queue), Some(status)) => {
-                    let sql = format!("{base} WHERE j.queue = $1 AND j.status = $2 \
-                                       ORDER BY j.created_at DESC LIMIT $3");
+                    let sql = format!("{base} WHERE queue = $1 AND status = $2 \
+                                       ORDER BY created_at DESC LIMIT $3");
                     let mut rows = sqlx::query(&sql)
                         .bind(queue)
                         .bind(status)
@@ -522,8 +497,8 @@ impl Queue {
                     }
                 }
                 (Some(queue), None) => {
-                    let sql = format!("{base} WHERE j.queue = $1 \
-                                       ORDER BY j.created_at DESC LIMIT $2");
+                    let sql = format!("{base} WHERE queue = $1 \
+                                       ORDER BY created_at DESC LIMIT $2");
                     let mut rows = sqlx::query(&sql)
                         .bind(queue)
                         .bind(limit)
@@ -533,8 +508,8 @@ impl Queue {
                     }
                 }
                 (None, Some(status)) => {
-                    let sql = format!("{base} WHERE j.status = $1 \
-                                       ORDER BY j.created_at DESC LIMIT $2");
+                    let sql = format!("{base} WHERE status = $1 \
+                                       ORDER BY created_at DESC LIMIT $2");
                     let mut rows = sqlx::query(&sql)
                         .bind(status)
                         .bind(limit)
@@ -544,7 +519,7 @@ impl Queue {
                     }
                 }
                 (None, None) => {
-                    let sql = format!("{base} ORDER BY j.created_at DESC LIMIT $1");
+                    let sql = format!("{base} ORDER BY created_at DESC LIMIT $1");
                     let mut rows = sqlx::query(&sql)
                         .bind(limit)
                         .fetch(&pool);
@@ -661,18 +636,12 @@ impl Queue {
                  ORDER BY priority DESC, created_at \
                  LIMIT 1 \
                  FOR UPDATE SKIP LOCKED \
-             ), \
-             updated AS ( \
-                 UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
-                 FROM selected s \
-                 WHERE j.id = s.id \
-                 RETURNING j.id, j.queue, j.status, j.description, j.created_at, j.key, j.lock, \
-                           j.error, j.retry_count, j.priority, j.payload_hash \
              ) \
-             SELECT u.id, u.queue, u.status, u.description, u.created_at, u.key, u.lock, u.error, \
-                    u.retry_count, u.priority, p.data AS payload \
-             FROM updated u \
-             JOIN payloads p ON p.hash = u.payload_hash",
+             UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
+             FROM selected s \
+             WHERE j.id = s.id \
+             RETURNING j.id, j.queue, j.status, j.description, j.created_at, j.key, j.lock, \
+                       j.error, j.retry_count, j.priority, j.payload",
         )
         .bind(queue)
         .bind(lock_token)
@@ -702,15 +671,11 @@ impl Queue {
     ///
     /// Returns `None` if the job does not exist.
     pub async fn get_job_payload(&self, id: Uuid) -> Result<Option<Vec<u8>>, ListError> {
-        let row: Option<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT p.data FROM jobs j \
-             JOIN payloads p ON p.hash = j.payload_hash \
-             WHERE j.id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(ListError::Query)?;
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT payload FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(ListError::Query)?;
 
         Ok(row.map(|(data,)| data))
     }
@@ -807,41 +772,23 @@ impl Queue {
             .collect())
     }
 
-    /// Deletes jobs and cleans up their payloads.
+    /// Deletes jobs.
     ///
-    /// Decrements the payload reference counts and deletes payloads no longer referenced. Returns
-    /// the number of jobs deleted. Skips non-existent jobs.
+    /// Returns the number of jobs deleted. Skips non-existent jobs.
     pub async fn delete_jobs(&self, ids: &[Uuid]) -> Result<u64, ModifyError> {
-        let mut tx = self.pool.begin().await.map_err(ModifyError::Database)?;
-
-        // Get payload hashes for all jobs
-        let rows: Vec<(Vec<u8>,)> =
-            sqlx::query_as("SELECT payload_hash FROM jobs WHERE id = ANY($1)")
-                .bind(ids)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(ModifyError::Database)?;
-
-        // Delete all jobs
         let result = sqlx::query("DELETE FROM jobs WHERE id = ANY($1)")
             .bind(ids)
-            .execute(&mut *tx)
+            .execute(&self.pool)
             .await
             .map_err(ModifyError::Database)?;
 
-        // Release payloads
-        for (payload_hash,) in rows {
-            release_payload(&mut tx, &payload_hash).await?;
-        }
-
-        tx.commit().await.map_err(ModifyError::Database)?;
         Ok(result.rows_affected())
     }
 
     /// Deletes a queue and all its jobs.
     ///
-    /// All jobs in the queue are deleted and their payloads cleaned up. Returns the number of jobs
-    /// deleted. Returns [`ModifyError::QueueNotFound`] if the queue doesn't exist.
+    /// Returns the number of jobs deleted.
+    /// Returns [`ModifyError::QueueNotFound`] if the queue doesn't exist.
     pub async fn delete_queue(&self, queue: &str) -> Result<u64, ModifyError> {
         let mut tx = self.pool.begin().await.map_err(ModifyError::Database)?;
 
@@ -855,14 +802,6 @@ impl Queue {
             return Err(ModifyError::QueueNotFound);
         }
 
-        // Get all payload hashes for jobs in this queue
-        let payload_hashes: Vec<(Vec<u8>,)> =
-            sqlx::query_as("SELECT payload_hash FROM jobs WHERE queue = $1")
-                .bind(queue)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(ModifyError::Database)?;
-
         // Delete all jobs in the queue
         let result = sqlx::query("DELETE FROM jobs WHERE queue = $1")
             .bind(queue)
@@ -870,11 +809,6 @@ impl Queue {
             .await
             .map_err(ModifyError::Database)?;
         let deleted_count = result.rows_affected();
-
-        // Release all payloads
-        for (hash,) in payload_hashes {
-            release_payload(&mut tx, &hash).await?;
-        }
 
         // Delete the queue
         sqlx::query("DELETE FROM queues WHERE queue = $1")
@@ -918,38 +852,6 @@ impl Queue {
     {
         transform::transform_job_payload(&self.pool, job_id, transform).await
     }
-
-    /// Deletes all payloads with zero references.
-    ///
-    /// Useful as a final sweep after migration or to recover from interrupted operations.
-    pub async fn cleanup_orphaned_payloads(&self) -> Result<u64, ModifyError> {
-        let result = sqlx::query("DELETE FROM payloads WHERE refcount <= 0")
-            .execute(&self.pool)
-            .await
-            .map_err(ModifyError::Database)?;
-
-        Ok(result.rows_affected())
-    }
-}
-
-/// Decrements the refcount for a payload and deletes it if no longer referenced.
-pub(crate) async fn release_payload(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    hash: &[u8],
-) -> Result<(), ModifyError> {
-    sqlx::query("UPDATE payloads SET refcount = refcount - 1 WHERE hash = $1")
-        .bind(hash)
-        .execute(&mut **tx)
-        .await
-        .map_err(ModifyError::Database)?;
-
-    sqlx::query("DELETE FROM payloads WHERE hash = $1 AND refcount <= 0")
-        .bind(hash)
-        .execute(&mut **tx)
-        .await
-        .map_err(ModifyError::Database)?;
-
-    Ok(())
 }
 
 /// Converts a row containing job metadata and payload into a [`PendingJob`].
@@ -983,18 +885,11 @@ pub(crate) async fn next_pending_job<T: DeserializeOwned>(
              ORDER BY priority DESC, created_at \
              LIMIT 1 \
              FOR UPDATE SKIP LOCKED \
-         ), \
-         updated AS ( \
-             UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
-             FROM selected s \
-             WHERE j.id = s.id \
-             RETURNING j.id, j.queue, j.description, j.status, j.created_at, j.priority, \
-                       j.payload_hash \
          ) \
-         SELECT u.id, u.queue, u.description, u.status, u.created_at, u.priority, \
-                p.data AS payload \
-         FROM updated u \
-         JOIN payloads p ON p.hash = u.payload_hash",
+         UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
+         FROM selected s \
+         WHERE j.id = s.id \
+         RETURNING j.id, j.queue, j.description, j.status, j.created_at, j.priority, j.payload",
     )
     .bind(queue)
     .bind(lock_token)

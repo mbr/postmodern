@@ -1,6 +1,5 @@
 //! Atomic payload transformation.
 
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -11,7 +10,7 @@ use crate::error::ModifyError;
 pub enum TransformResult {
     /// Job was locked by another transaction, skipped.
     Skipped,
-    /// Payload unchanged after transformation (same hash).
+    /// Payload unchanged after transformation.
     Unchanged,
     /// Payload was transformed and replaced.
     Transformed,
@@ -34,58 +33,28 @@ where
     let mut tx = pool.begin().await.map_err(ModifyError::Database)?;
 
     let row: Option<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT queue, payload_hash FROM jobs WHERE id = $1 FOR UPDATE SKIP LOCKED")
+        sqlx::query_as("SELECT queue, payload FROM jobs WHERE id = $1 FOR UPDATE SKIP LOCKED")
             .bind(job_id)
             .fetch_optional(&mut *tx)
             .await
             .map_err(ModifyError::Database)?;
 
-    let Some((queue_name, old_hash)) = row else {
+    let Some((queue_name, old_payload)) = row else {
         return Ok(TransformResult::Skipped);
     };
 
-    let old_payload: Option<(Vec<u8>,)> =
-        sqlx::query_as("SELECT data FROM payloads WHERE hash = $1")
-            .bind(&old_hash)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(ModifyError::Database)?;
-
-    let Some((old_payload,)) = old_payload else {
-        return Err(ModifyError::NotFound);
-    };
-
     let new_payload = transform(&queue_name, &old_payload).map_err(ModifyError::Transform)?;
-    let new_hash = Sha256::digest(&new_payload);
 
-    if old_hash == new_hash.as_slice() {
+    if old_payload == new_payload {
         return Ok(TransformResult::Unchanged);
     }
 
-    sqlx::query(
-        "INSERT INTO payloads (hash, data, refcount) VALUES ($1, $2, 0) \
-         ON CONFLICT (hash) DO NOTHING",
-    )
-    .bind(new_hash.as_slice())
-    .bind(&new_payload)
-    .execute(&mut *tx)
-    .await
-    .map_err(ModifyError::Database)?;
-
-    sqlx::query("UPDATE jobs SET payload_hash = $1 WHERE id = $2")
-        .bind(new_hash.as_slice())
+    sqlx::query("UPDATE jobs SET payload = $1 WHERE id = $2")
+        .bind(&new_payload)
         .bind(job_id)
         .execute(&mut *tx)
         .await
         .map_err(ModifyError::Database)?;
-
-    sqlx::query("UPDATE payloads SET refcount = refcount + 1 WHERE hash = $1")
-        .bind(new_hash.as_slice())
-        .execute(&mut *tx)
-        .await
-        .map_err(ModifyError::Database)?;
-
-    crate::release_payload(&mut tx, &old_hash).await?;
 
     tx.commit().await.map_err(ModifyError::Database)?;
     Ok(TransformResult::Transformed)
@@ -109,7 +78,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn updates_hash_and_refcounts() {
+    async fn transforms_payload() {
         let (queue, _db) = setup_db().await;
 
         let id = queue
@@ -137,15 +106,6 @@ mod tests {
             .expect("get payload failed")
             .expect("payload not found");
         assert_ne!(updated_payload, old_payload);
-
-        let (refcount,): (i32,) = sqlx::query_as(
-            "SELECT refcount FROM payloads WHERE hash = (SELECT payload_hash FROM jobs WHERE id = $1)",
-        )
-        .bind(id)
-        .fetch_one(queue.pool())
-        .await
-        .expect("query failed");
-        assert_eq!(refcount, 1);
     }
 
     #[tokio::test]
@@ -163,56 +123,5 @@ mod tests {
                 .await
                 .expect("transform failed");
         assert_eq!(result, TransformResult::Unchanged);
-    }
-
-    #[tokio::test]
-    async fn handles_shared_payloads() {
-        let (queue, _db) = setup_db().await;
-
-        // Enqueue same payload twice - they share the same payload via content deduplication
-        let id1 = queue
-            .enqueue("test", 42i32, EnqueueOptions::default())
-            .await
-            .expect("enqueue failed")
-            .expect("unexpected duplicate");
-
-        let id2 = queue
-            .enqueue("test", 42i32, EnqueueOptions::default())
-            .await
-            .expect("enqueue failed")
-            .expect("unexpected duplicate");
-
-        let (refcount_before,): (i32,) = sqlx::query_as(
-            "SELECT refcount FROM payloads WHERE hash = (SELECT payload_hash FROM jobs WHERE id = $1)",
-        )
-        .bind(id1)
-        .fetch_one(queue.pool())
-        .await
-        .expect("query failed");
-        assert_eq!(refcount_before, 2);
-
-        transform_job_payload(queue.pool(), id1, |_queue, _payload| {
-            Ok(rmp_serde::to_vec_named(&99i32).expect("serialize failed"))
-        })
-        .await
-        .expect("transform failed");
-
-        let (old_refcount,): (i32,) = sqlx::query_as(
-            "SELECT refcount FROM payloads WHERE hash = (SELECT payload_hash FROM jobs WHERE id = $1)",
-        )
-        .bind(id2)
-        .fetch_one(queue.pool())
-        .await
-        .expect("query failed");
-        assert_eq!(old_refcount, 1);
-
-        let (new_refcount,): (i32,) = sqlx::query_as(
-            "SELECT refcount FROM payloads WHERE hash = (SELECT payload_hash FROM jobs WHERE id = $1)",
-        )
-        .bind(id1)
-        .fetch_one(queue.pool())
-        .await
-        .expect("query failed");
-        assert_eq!(new_refcount, 1);
     }
 }
