@@ -218,14 +218,25 @@ mod tests {
             let (_, _ack) = job.into_parts();
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let (status, error, retry_count): (JobStatus, Option<String>, i32) =
-            sqlx::query_as("SELECT status, error, retry_count FROM jobs WHERE id = $1")
-                .bind(id)
-                .fetch_one(queue.pool())
-                .await
-                .expect("query failed");
+        // JobAck::drop spawns a fire-and-forget task to soft-fail the job. In production, the
+        // runtime keeps running and the task completes normally. In tests, exiting immediately
+        // would shut down the runtime before the task finishes, so we poll until the status
+        // changes from InProgress.
+        let mut status = JobStatus::InProgress;
+        let mut error = None;
+        let mut retry_count = 0;
+        for _ in 0..100 {
+            (status, error, retry_count) =
+                sqlx::query_as("SELECT status, error, retry_count FROM jobs WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(queue.pool())
+                    .await
+                    .expect("query failed");
+            if status != JobStatus::InProgress {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert_eq!(status, JobStatus::Pending);
         assert_eq!(error, Some("dropped without ack".to_string()));
         assert_eq!(retry_count, 1);
