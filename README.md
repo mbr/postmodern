@@ -106,6 +106,34 @@ queue.resume_queue("tasks").await?;         // Returns count of resumed jobs
 
 The `EnqueueOptions::initial_state` field controls whether jobs start as `Pending`, `Paused`, or `Auto` (inherits from queue state, the default).
 
+## Idempotency keys
+
+Use `EnqueueOptions::key` to prevent duplicate jobs. When a key is set, enqueueing returns `None` if a job with that key already exists in the queue:
+
+```rust,no_run
+# use postmodern::{Queue, EnqueueOptions};
+# async fn example(queue: &Queue) -> Result<(), Box<dyn std::error::Error>> {
+let opts = EnqueueOptions {
+    key: Some("user-123-welcome-email".into()),
+    ..Default::default()
+};
+
+// First enqueue succeeds
+let id = queue.enqueue("emails", "welcome", opts.clone()).await?;
+assert!(id.is_some());
+
+// Duplicate key returns None instead of creating a second job
+let dup = queue.enqueue("emails", "welcome", opts).await?;
+assert!(dup.is_none());
+
+// Look up a job by its key
+let job = queue.get_job_by_key("emails", "user-123-welcome-email").await?;
+# Ok(())
+# }
+```
+
+Keys are scoped to their queue. Deleting a job frees its key for reuse.
+
 ## Job operations
 
 Beyond streaming, jobs can be fetched by ID, listed, moved, or copied:
@@ -205,7 +233,6 @@ Or pass `--db` on each invocation.
 
 ## Limitations aka future features
 
-- **Job keys for idempotence**: deduplicate or update jobs by a user-defined key, preventing duplicate work when the same logical job is enqueued multiple times
 - **Scheduled jobs**: enqueue jobs to run at a specific time or on a cron schedule
 - **LISTEN/NOTIFY**: use Postgres notifications for lower-latency job delivery instead of polling
 - **Configurable settings**: lock duration, retry limits, and backoff parameters are currently hardcoded with sane defaults
