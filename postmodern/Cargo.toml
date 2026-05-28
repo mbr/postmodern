@@ -31,5 +31,5 @@ uuid = { workspace = true }
 uuid-suffix = "0.1.2"
 
 [dev-dependencies]
-pgdb = "0.5"
+pgdb = "0.6"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

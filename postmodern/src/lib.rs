@@ -1079,7 +1079,7 @@ mod tests {
 
     use crate::{job::JobStatus, EnqueueOptions, Queue};
 
-    async fn setup_db() -> (Queue, pgdb::DbUrl) {
+    async fn setup_db() -> (Queue, pgdb::DbInstance) {
         let db_url = pgdb::db_fixture();
         let queue = Queue::connect(db_url.as_str())
             .await
