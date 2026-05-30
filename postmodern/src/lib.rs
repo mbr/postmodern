@@ -785,6 +785,31 @@ impl Queue {
         Ok(result.rows_affected())
     }
 
+    /// Renames a queue.
+    ///
+    /// Returns [`ModifyError::QueueNotFound`] if the source queue doesn't exist.
+    /// Returns [`ModifyError::QueueAlreadyExists`] if the target queue already exists.
+    pub async fn rename_queue(&self, from: &str, to: &str) -> Result<(), ModifyError> {
+        let result = sqlx::query("UPDATE queues SET queue = $2 WHERE queue = $1")
+            .bind(from)
+            .bind(to)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                if let sqlx::Error::Database(ref db_err) = e {
+                    if db_err.code().as_deref() == Some("23505") {
+                        return ModifyError::QueueAlreadyExists;
+                    }
+                }
+                ModifyError::Database(e)
+            })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ModifyError::QueueNotFound);
+        }
+        Ok(())
+    }
+
     /// Deletes a queue and all its jobs.
     ///
     /// Returns the number of jobs deleted.

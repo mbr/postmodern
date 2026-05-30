@@ -53,6 +53,9 @@ pub enum ModifyError {
     /// Queue does not exist.
     #[error("queue not found")]
     QueueNotFound,
+    /// Queue already exists.
+    #[error("queue already exists")]
+    QueueAlreadyExists,
     /// Transform function failed.
     #[error("transform failed")]
     Transform(#[source] anyhow::Error),

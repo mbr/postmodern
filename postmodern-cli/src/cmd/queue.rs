@@ -67,6 +67,14 @@ pub async fn run(queue: &Queue, command: QueueCommand) -> Result<()> {
                 .context("failed to resume queue")?;
             println!("Resumed queue '{name}', {count} jobs resumed.");
         }
+
+        QueueCommand::Rename { from, to } => {
+            queue
+                .rename_queue(&from, &to)
+                .await
+                .context("failed to rename queue")?;
+            println!("Renamed queue '{from}' to '{to}'.");
+        }
     }
 
     Ok(())

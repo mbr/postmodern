@@ -70,6 +70,13 @@ pub enum QueueCommand {
         /// Name of the queue to resume.
         queue: String,
     },
+    /// Rename a queue.
+    Rename {
+        /// Current queue name.
+        from: String,
+        /// New queue name.
+        to: String,
+    },
 }
 
 /// Job inspection and manipulation commands.
