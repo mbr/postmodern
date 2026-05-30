@@ -1318,4 +1318,49 @@ mod tests {
             .expect("re-enqueue after delete should succeed");
         assert_ne!(id, new_id);
     }
+
+    #[tokio::test]
+    async fn rename_queue_moves_jobs() {
+        let (queue, _db) = setup_db().await;
+
+        // Enqueue some jobs
+        let id1 = queue
+            .enqueue("test", 1i32, EnqueueOptions::default())
+            .await
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
+        let id2 = queue
+            .enqueue("test", 2i32, EnqueueOptions::default())
+            .await
+            .expect("enqueue failed")
+            .expect("unexpected duplicate");
+
+        // Rename the queue
+        queue
+            .rename_queue("test", "renamed")
+            .await
+            .expect("rename failed");
+
+        // Old queue should not exist
+        let old_queues = queue.list_queues().await.expect("list failed");
+        assert!(!old_queues.iter().any(|q| q.queue == "test"));
+
+        // New queue should exist
+        assert!(old_queues.iter().any(|q| q.queue == "renamed"));
+
+        // Jobs should be in the new queue
+        let (q1,): (String,) = sqlx::query_as("SELECT queue FROM jobs WHERE id = $1")
+            .bind(id1)
+            .fetch_one(queue.pool())
+            .await
+            .expect("query failed");
+        assert_eq!(q1, "renamed");
+
+        let (q2,): (String,) = sqlx::query_as("SELECT queue FROM jobs WHERE id = $1")
+            .bind(id2)
+            .fetch_one(queue.pool())
+            .await
+            .expect("query failed");
+        assert_eq!(q2, "renamed");
+    }
 }
