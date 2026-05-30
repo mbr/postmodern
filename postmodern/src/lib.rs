@@ -955,7 +955,7 @@ mod tests {
         // hard_fail goes straight to Failed
         let job1 = stream.next().await.expect("no job").expect("fetch failed");
         job1.into_parts()
-            .1
+            .2
             .hard_fail("unrecoverable error")
             .await
             .expect("hard_fail failed");
@@ -963,7 +963,7 @@ mod tests {
         // soft_fail goes to Pending (first retry is immediate)
         let job2 = stream.next().await.expect("no job").expect("fetch failed");
         job2.into_parts()
-            .1
+            .2
             .soft_fail("transient error")
             .await
             .expect("soft_fail failed");

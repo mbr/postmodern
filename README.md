@@ -75,7 +75,7 @@ let id = queue.enqueue("tasks", payload, EnqueueOptions::default()).await?;
 // Process jobs
 let mut stream = pin!(queue.stream_jobs::<MyPayload, _, _>(["tasks"]));
 while let Some(job) = stream.next().await {
-    let (payload, ack) = job.into_parts();
+    let (_meta, payload, ack) = job.into_parts();
 
     // Process payload...
 
@@ -159,7 +159,7 @@ For jobs exceeding `LOCK_DURATION`, call `refresh_lock()` periodically to preven
 ```rust,no_run
 # use postmodern::job::PendingJob;
 # async fn example(job: PendingJob<String>) -> Result<(), Box<dyn std::error::Error>> {
-let (payload, mut ack) = job.into_parts();
+let (_meta, payload, mut ack) = job.into_parts();
 loop {
     // Do work chunk...
     ack.refresh_lock().await?;
@@ -197,9 +197,8 @@ let pipeline = Pipeline::builder()
 
 // Process jobs from all pipeline stages concurrently
 queue
-    .stream_pipeline(&pipeline)
-    .for_each_concurrent(16, |(details, payload, ack)|
-        pipeline.dispatch(details, payload, ack))
+    .stream_jobs(pipeline.queues())
+    .for_each_concurrent(16, |job| pipeline.dispatch(job))
     .await;
 # }
 ```

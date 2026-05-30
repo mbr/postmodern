@@ -1296,6 +1296,7 @@ dependencies = [
  "futures",
  "pgdb",
  "rmp-serde",
+ "rmpv",
  "serde",
  "sqlx",
  "thiserror 2.0.18",

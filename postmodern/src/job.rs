@@ -101,11 +101,11 @@ impl<T> PendingJob<T> {
         Self { meta, payload, ack }
     }
 
-    /// Separates the payload from the acknowledgment handle.
+    /// Separates the job into its components.
     ///
-    /// Returns the payload and a [`JobAck`] for signaling completion, failure, or retry.
-    pub fn into_parts(self) -> (T, JobAck) {
-        (self.payload, self.ack)
+    /// Returns the metadata, payload, and a [`JobAck`] for signaling completion, failure, or retry.
+    pub fn into_parts(self) -> (JobMetadata, T, JobAck) {
+        (self.meta, self.payload, self.ack)
     }
 
     /// Runs a function with the payload and acknowledges the job based on its result.
@@ -137,7 +137,7 @@ impl<T> PendingJob<T> {
         Fut: Future<Output = Result<R, E>>,
         E: Display,
     {
-        let (payload, ack) = self.into_parts();
+        let (_meta, payload, ack) = self.into_parts();
         ack.run(f(payload)).await
     }
 }

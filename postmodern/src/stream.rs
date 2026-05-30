@@ -10,7 +10,6 @@ use serde::de::DeserializeOwned;
 use crate::{
     error::FetchError,
     job::{JobAck, PendingJob},
-    pipeline::Pipeline,
     JobDetails, Queue,
 };
 
@@ -136,45 +135,6 @@ impl Queue {
             }
         })
     }
-
-    /// Returns a stream of raw jobs for a pipeline's queues.
-    ///
-    /// Handles errors internally: query errors are logged and retried after a delay.
-    /// Each yielded job should be processed via [`Pipeline::dispatch`].
-    pub fn stream_pipeline<'a>(
-        &'a self,
-        pipeline: &'a Pipeline,
-    ) -> impl Stream<Item = (JobDetails, Vec<u8>, JobAck)> + Send + 'a {
-        let queue = self.clone();
-        let queues: Vec<String> = pipeline.queues().to_vec();
-        unfold((queue, queues), |(queue, queues)| async move {
-            let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
-            loop {
-                let result = (|| poll_next_raw(&queue, &queue_refs))
-                    .retry(
-                        ExponentialBuilder::default()
-                            .with_min_delay(Duration::from_millis(100))
-                            .with_max_delay(Duration::from_secs(30))
-                            .with_max_times(usize::MAX)
-                            .build(),
-                    )
-                    .when(|e| matches!(e, StreamError::Empty))
-                    .await;
-
-                match result {
-                    Ok(job) => return Some((job, (queue, queues))),
-                    Err(StreamError::Empty) => unreachable!("infinite retry"),
-                    Err(StreamError::Fetch(FetchError::Query(e))) => {
-                        tracing::warn!(error = %e.display_full(), "query error, retrying");
-                        tokio::time::sleep(QUERY_ERROR_DELAY).await;
-                    }
-                    Err(StreamError::Fetch(FetchError::Deserialize(_, _))) => {
-                        unreachable!("raw stream does not deserialize")
-                    }
-                }
-            }
-        })
-    }
 }
 
 /// Internal error type for stream retry logic.
@@ -232,7 +192,7 @@ mod tests {
         assert_eq!(job.meta.id, id);
         assert_eq!(job.payload, "hello");
 
-        job.into_parts().1.commit().await.expect("commit failed");
+        job.into_parts().2.commit().await.expect("commit failed");
 
         let (status,): (JobStatus,) = sqlx::query_as("SELECT status FROM jobs WHERE id = $1")
             .bind(id)
@@ -280,7 +240,7 @@ mod tests {
 
         let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
-        let (_, ack) = job.into_parts();
+        let (_, _, ack) = job.into_parts();
 
         sqlx::query("UPDATE jobs SET lock_token = gen_random_uuid() WHERE id = $1")
             .bind(id)
@@ -304,7 +264,7 @@ mod tests {
         {
             let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
             let job = stream.next().await.expect("no job").expect("fetch failed");
-            let (_, _ack) = job.into_parts();
+            let (_, _, _ack) = job.into_parts();
         }
 
         // JobAck::drop spawns a fire-and-forget task to soft-fail the job. In production, the
@@ -353,7 +313,7 @@ mod tests {
         let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         job.into_parts()
-            .1
+            .2
             .soft_fail("final failure")
             .await
             .expect("soft_fail failed");

@@ -23,9 +23,8 @@
 //!     .build();
 //!
 //! queue
-//!     .stream_pipeline(&pipeline)
-//!     .for_each_concurrent(16, |(details, payload, ack)|
-//!         pipeline.dispatch(details, payload, ack))
+//!     .stream_jobs(pipeline.queues())
+//!     .for_each_concurrent(16, |job| pipeline.dispatch(job))
 //!     .await;
 //! # }
 //! ```
@@ -37,8 +36,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     error::{AckError, AdvanceError},
-    job::{AdvanceOptions, JobAck},
-    JobDetails,
+    job::{AdvanceOptions, JobAck, JobMetadata, PendingJob},
 };
 
 /// Outcome of processing a pipeline stage.
@@ -84,7 +82,7 @@ pub enum PipelineError {
 
 /// Type-erased stage handler.
 type StageHandler = Arc<
-    dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, anyhow::Error>> + Send>>
+    dyn Fn(rmpv::Value) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, anyhow::Error>> + Send>>
         + Send
         + Sync,
 >;
@@ -127,7 +125,7 @@ impl Pipeline {
     }
 
     /// Runs the stage handler for a queue.
-    async fn run_stage(&self, queue: &str, payload: Vec<u8>) -> Outcome {
+    async fn run_stage(&self, queue: &str, payload: rmpv::Value) -> Outcome {
         let entry = match self.stages.get(queue) {
             Some(e) => e,
             None => return Outcome::Fail(format!("unknown stage: {queue}")),
@@ -150,11 +148,11 @@ impl Pipeline {
     /// Dispatches the job to its stage handler and resolves it based on the outcome.
     pub async fn run(
         &self,
-        details: &JobDetails,
-        payload: Vec<u8>,
+        meta: &JobMetadata,
+        payload: rmpv::Value,
         ack: JobAck,
     ) -> Result<(), PipelineError> {
-        match self.run_stage(&details.queue, payload).await {
+        match self.run_stage(&meta.queue, payload).await {
             Outcome::Advance { queue, payload } => {
                 ack.advance(&queue, &payload, AdvanceOptions::default())
                     .await
@@ -176,23 +174,23 @@ impl Pipeline {
     /// Processes a job through the pipeline, logging errors.
     ///
     /// Like [`run`](Self::run), but errors are logged instead of returned. Use with
-    /// [`Queue::stream_pipeline`](crate::Queue::stream_pipeline) for fire-and-forget processing:
+    /// [`Queue::stream_jobs`] for fire-and-forget processing:
     ///
     /// ```ignore
-    /// queue.stream_pipeline(&pipeline)
-    ///     .for_each_concurrent(16, |(details, payload, ack)|
-    ///         pipeline.dispatch(details, payload, ack))
+    /// queue.stream_jobs(pipeline.queues())
+    ///     .for_each_concurrent(16, |job| pipeline.dispatch(job))
     ///     .await;
     /// ```
-    pub async fn dispatch(&self, details: JobDetails, payload: Vec<u8>, ack: JobAck) {
-        if let Err(e) = self.run(&details, payload, ack).await {
-            tracing::error!(id = %details.id, queue = %details.queue, error = %e.display_full(), "pipeline error");
+    pub async fn dispatch(&self, job: PendingJob<rmpv::Value>) {
+        let (meta, payload, ack) = job.into_parts();
+        if let Err(e) = self.run(&meta, payload, ack).await {
+            tracing::error!(id = %meta.id, queue = %meta.queue, error = %e.display_full(), "pipeline error");
         }
     }
 
     /// Returns the queue names this pipeline handles.
-    pub fn queues(&self) -> &[String] {
-        &self.queues
+    pub fn queues(&self) -> Vec<String> {
+        self.queues.clone()
     }
 }
 
@@ -215,12 +213,12 @@ impl PipelineBuilder {
             }
         }
 
-        // Construct handler, will take and emit raw bytes, but serialize in between.
+        // Construct handler: takes Value, converts to In, processes, converts Out to bytes.
         let f = Arc::new(f);
-        let handler: StageHandler = Arc::new(move |bytes| {
+        let handler: StageHandler = Arc::new(move |value| {
             let f = Arc::clone(&f);
             Box::pin(async move {
-                let input: In = rmp_serde::from_slice(&bytes)?;
+                let input: In = rmpv::ext::from_value(value)?;
                 let output = f(input).await?;
                 Ok(rmp_serde::to_vec_named(&output)?)
             })
@@ -286,7 +284,7 @@ mod tests {
             .stage("stage3", |_x: i32| async move { Ok(()) })
             .build();
 
-        assert_eq!(pipeline.queues(), &["stage1", "stage2", "stage3"]);
+        assert_eq!(pipeline.queues(), vec!["stage1", "stage2", "stage3"]);
 
         let id = queue
             .enqueue("stage1", 10i32, EnqueueOptions::default())
@@ -294,47 +292,43 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let queues: Vec<String> = pipeline.queues().to_vec();
+        let mut stream = pin!(queue.try_stream_jobs::<rmpv::Value, _, _>(pipeline.queues()));
 
-        let mut stream = pin!(queue.try_stream_raw(queues));
-
-        let (details, payload, ack) = stream.next().await.expect("no job").expect("fetch failed");
-        assert_eq!(details.id, id);
-        assert_eq!(details.queue, "stage1");
+        let job = stream.next().await.expect("no job").expect("fetch failed");
+        assert_eq!(job.meta.id, id);
+        assert_eq!(job.meta.queue, "stage1");
+        let (meta, payload, ack) = job.into_parts();
         pipeline
-            .run(&details, payload, ack)
+            .run(&meta, payload, ack)
             .await
             .expect("pipeline failed");
 
-        let job = queue.get_job(id).await.expect("get failed").unwrap();
-        assert_eq!(job.status, JobStatus::Finished);
+        let stored = queue.get_job(id).await.expect("get failed").unwrap();
+        assert_eq!(stored.status, JobStatus::Finished);
 
-        let (details2, payload2, ack2) =
-            stream.next().await.expect("no job").expect("fetch failed");
-        assert_eq!(details2.queue, "stage2");
-        let val: i32 = rmp_serde::from_slice(&payload2).expect("deserialize failed");
+        let job2 = stream.next().await.expect("no job").expect("fetch failed");
+        assert_eq!(job2.meta.queue, "stage2");
+        let val: i32 = rmpv::ext::from_value(job2.payload.clone()).expect("convert failed");
         assert_eq!(val, 11);
+        let (meta2, payload2, ack2) = job2.into_parts();
         pipeline
-            .run(&details2, payload2, ack2)
+            .run(&meta2, payload2, ack2)
             .await
             .expect("pipeline failed");
 
-        let (details3, payload3, ack3) =
-            stream.next().await.expect("no job").expect("fetch failed");
-        assert_eq!(details3.queue, "stage3");
-        let val3: i32 = rmp_serde::from_slice(&payload3).expect("deserialize failed");
+        let job3 = stream.next().await.expect("no job").expect("fetch failed");
+        assert_eq!(job3.meta.queue, "stage3");
+        let val3: i32 = rmpv::ext::from_value(job3.payload.clone()).expect("convert failed");
         assert_eq!(val3, 22);
+        let job3_id = job3.meta.id;
+        let (meta3, payload3, ack3) = job3.into_parts();
         pipeline
-            .run(&details3, payload3, ack3)
+            .run(&meta3, payload3, ack3)
             .await
             .expect("pipeline failed");
 
-        let job3 = queue
-            .get_job(details3.id)
-            .await
-            .expect("get failed")
-            .unwrap();
-        assert_eq!(job3.status, JobStatus::Finished);
+        let stored3 = queue.get_job(job3_id).await.expect("get failed").unwrap();
+        assert_eq!(stored3.status, JobStatus::Finished);
     }
 
     #[tokio::test]
@@ -360,20 +354,20 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let queues: Vec<String> = pipeline.queues().to_vec();
-        let mut stream = pin!(queue.try_stream_raw(queues));
+        let mut stream = pin!(queue.try_stream_jobs::<rmpv::Value, _, _>(pipeline.queues()));
 
-        let (details, payload, ack) = stream.next().await.expect("no job").expect("fetch failed");
-        assert_eq!(details.id, id);
+        let job = stream.next().await.expect("no job").expect("fetch failed");
+        assert_eq!(job.meta.id, id);
+        let (meta, payload, ack) = job.into_parts();
         pipeline
-            .run(&details, payload, ack)
+            .run(&meta, payload, ack)
             .await
             .expect("pipeline failed");
 
-        let job = queue.get_job(id).await.expect("get failed").unwrap();
-        assert_eq!(job.status, JobStatus::Pending);
-        assert_eq!(job.retry_count, 1);
-        assert!(job.error.as_ref().unwrap().contains("transient error"));
+        let stored = queue.get_job(id).await.expect("get failed").unwrap();
+        assert_eq!(stored.status, JobStatus::Pending);
+        assert_eq!(stored.retry_count, 1);
+        assert!(stored.error.as_ref().unwrap().contains("transient error"));
     }
 
     #[tokio::test]
@@ -399,19 +393,17 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let (details, payload, ack) = queue
-            .pull_next(&["unknown"])
-            .await
-            .expect("fetch failed")
-            .expect("no job");
-        assert_eq!(details.id, id);
+        let mut stream = pin!(queue.try_stream_jobs::<rmpv::Value, _, _>(["unknown"]));
+        let job = stream.next().await.expect("no job").expect("fetch failed");
+        assert_eq!(job.meta.id, id);
+        let (meta, payload, ack) = job.into_parts();
         pipeline
-            .run(&details, payload, ack)
+            .run(&meta, payload, ack)
             .await
             .expect("pipeline failed");
 
-        let job = queue.get_job(id).await.expect("get failed").unwrap();
-        assert_eq!(job.status, JobStatus::Failed);
-        assert!(job.error.as_ref().unwrap().contains("unknown stage"));
+        let stored = queue.get_job(id).await.expect("get failed").unwrap();
+        assert_eq!(stored.status, JobStatus::Failed);
+        assert!(stored.error.as_ref().unwrap().contains("unknown stage"));
     }
 }
