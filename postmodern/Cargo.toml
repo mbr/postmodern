@@ -20,7 +20,7 @@ dirs = "6"
 display_full_error = { version = "1", features = ["alloc"] }
 futures = { workspace = true }
 rmp-serde = "1"
-rmpv = "1"
+rmpv = { version = "1", features = ["with-serde"] }
 serde = { workspace = true }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono", "migrate"] }
 thiserror = "2"

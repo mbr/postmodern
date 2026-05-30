@@ -1,8 +1,23 @@
 //! Sequential durable workflows.
 //!
 //! Pipelines provide a layer on top of postmodern's job primitives for building multi-stage
-//! workflows. Each stage corresponds to a queue, and jobs advance atomically from one stage to
-//! the next.
+//! workflows. Each stage corresponds to a queue, and jobs advance from one stage to the next.
+//!
+//! # Semantics
+//!
+//! **Stages run in order of addition.** The builder links each stage to the previous one,
+//! forming a linear pipeline. There is no support for branching or parallel stages.
+//!
+//! **At-least-once execution.** The stage handler runs, then the job advances atomically to
+//! the next queue. If the process crashes between handler completion and the advance, the
+//! job's lease expires and it re-runs from the beginning of the current stage. Stages must
+//! be idempotent or tolerate duplicate execution.
+//!
+//! **All errors retry.** Handler errors trigger [`soft_fail`](crate::job::JobAck::soft_fail)
+//! with exponential backoff. After [`MAX_RETRIES`](crate::job::MAX_RETRIES), the job
+//! transitions to `Failed`. There is no way to signal permanent failure from within a stage.
+//!
+//! # Example
 //!
 //! ```no_run
 //! use futures::StreamExt;
@@ -11,9 +26,9 @@
 //! # #[derive(serde::Serialize, serde::Deserialize)] struct Scan;
 //! # #[derive(serde::Serialize, serde::Deserialize)] struct Ocred;
 //! # #[derive(serde::Serialize, serde::Deserialize)] struct Classified;
-//! async fn ocr(_: Scan) -> anyhow::Result<Ocred> { Ok(Ocred) }
-//! async fn classify(_: Ocred) -> anyhow::Result<Classified> { Ok(Classified) }
-//! async fn archive(_: Classified) -> anyhow::Result<()> { Ok(()) }
+//! # async fn ocr(_: Scan) -> Result<Ocred, std::io::Error> { Ok(Ocred) }
+//! # async fn classify(_: Ocred) -> Result<Classified, std::io::Error> { Ok(Classified) }
+//! # async fn archive(_: Classified) -> Result<(), std::io::Error> { Ok(()) }
 //!
 //! # async fn example(queue: Queue) {
 //! let pipeline = Pipeline::builder()
@@ -22,14 +37,26 @@
 //!     .stage("docs:archive", |c: Classified| async move { archive(c).await })
 //!     .build();
 //!
+//! // Process all stages with shared concurrency budget
 //! queue
 //!     .stream_jobs(pipeline.queues())
 //!     .for_each_concurrent(16, |job| pipeline.dispatch(job))
 //!     .await;
 //! # }
 //! ```
+//!
+//! For per-stage concurrency control, stream each stage separately:
+//!
+//! ```ignore
+//! // Each stage gets its own concurrency budget
+//! tokio::join!(
+//!     queue.stream_jobs(["docs:ocr"]).for_each_concurrent(8, |job| pipeline.dispatch(job)),
+//!     queue.stream_jobs(["docs:classify"]).for_each_concurrent(4, |job| pipeline.dispatch(job)),
+//!     queue.stream_jobs(["docs:archive"]).for_each_concurrent(2, |job| pipeline.dispatch(job)),
+//! );
+//! ```
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, fmt::Display, future::Future, pin::Pin, sync::Arc};
 
 use display_full_error::DisplayFullErrorExt;
 use serde::{de::DeserializeOwned, Serialize};
@@ -81,8 +108,10 @@ pub enum PipelineError {
 }
 
 /// Type-erased stage handler.
+///
+/// Returns serialized output bytes on success, or an error message string on failure.
 type StageHandler = Arc<
-    dyn Fn(rmpv::Value) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, anyhow::Error>> + Send>>
+    dyn Fn(rmpv::Value) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -139,7 +168,7 @@ impl Pipeline {
                 },
                 None => Outcome::Done,
             },
-            Err(e) => Outcome::Retry(format!("{e:#}")),
+            Err(msg) => Outcome::Retry(msg),
         }
     }
 
@@ -197,30 +226,42 @@ impl Pipeline {
 impl PipelineBuilder {
     /// Adds a stage that transforms `In` to `Out`.
     ///
-    /// Stages are linked in the order they are added. The handler receives a deserialized payload
-    /// and returns the output to be serialized for the next stage.
-    pub fn stage<In, Out, F, Fut>(mut self, queue: &str, f: F) -> Self
+    /// Stages are linked in the order they are added, forming a linear pipeline. The handler
+    /// receives a deserialized payload and returns the output to be serialized for the next stage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a stage with the same queue name has already been added.
+    pub fn stage<In, Out, E, F, Fut>(mut self, queue: &str, f: F) -> Self
     where
         In: DeserializeOwned + Send + 'static,
         Out: Serialize + Send + 'static,
+        E: Display + Send + 'static,
         F: Fn(In) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Out, anyhow::Error>> + Send + 'static,
+        Fut: Future<Output = Result<Out, E>> + Send + 'static,
     {
-        // Link stage to previous stage.
+        assert!(
+            !self.entries.contains_key(queue),
+            "duplicate stage queue name: {queue}"
+        );
+
+        // Link previous stage to this one (linear pipeline assumption).
         if let Some(prev) = self.queue_order.last() {
             if let Some(entry) = self.entries.get_mut(prev) {
                 entry.next = Some(queue.to_string());
             }
         }
 
-        // Construct handler: takes Value, converts to In, processes, converts Out to bytes.
+        // Construct handler: deserialize Value to In, run handler, serialize Out to bytes.
+        // Errors are formatted via Display and returned as strings.
         let f = Arc::new(f);
         let handler: StageHandler = Arc::new(move |value| {
             let f = Arc::clone(&f);
             Box::pin(async move {
-                let input: In = rmpv::ext::from_value(value)?;
-                let output = f(input).await?;
-                Ok(rmp_serde::to_vec_named(&output)?)
+                let input: In =
+                    rmpv::ext::from_value(value).map_err(|e| format!("deserialize: {e}"))?;
+                let output = f(input).await.map_err(|e| e.to_string())?;
+                rmp_serde::to_vec_named(&output).map_err(|e| format!("serialize: {e}"))
             })
         });
 
@@ -279,9 +320,9 @@ mod tests {
             .expect("failed to create queue");
 
         let pipeline = Pipeline::builder()
-            .stage("stage1", |x: i32| async move { Ok(x + 1) })
-            .stage("stage2", |x: i32| async move { Ok(x * 2) })
-            .stage("stage3", |_x: i32| async move { Ok(()) })
+            .stage("stage1", |x: i32| async move { Ok::<_, &str>(x + 1) })
+            .stage("stage2", |x: i32| async move { Ok::<_, &str>(x * 2) })
+            .stage("stage3", |_x: i32| async move { Ok::<_, &str>(()) })
             .build();
 
         assert_eq!(pipeline.queues(), vec!["stage1", "stage2", "stage3"]);
@@ -341,11 +382,10 @@ mod tests {
             .expect("failed to create queue");
 
         let pipeline = Pipeline::builder()
-            .stage("flaky", |_x: i32| async move {
-                anyhow::bail!("transient error");
-                #[allow(unreachable_code)]
-                Ok::<(), _>(())
-            })
+            .stage(
+                "flaky",
+                |_x: i32| async move { Err::<(), _>("transient error") },
+            )
             .build();
 
         let id = queue
@@ -384,7 +424,7 @@ mod tests {
             .expect("failed to create queue");
 
         let pipeline = Pipeline::builder()
-            .stage("known", |x: i32| async move { Ok(x) })
+            .stage("known", |x: i32| async move { Ok::<_, &str>(x) })
             .build();
 
         let id = queue
@@ -405,5 +445,14 @@ mod tests {
         let stored = queue.get_job(id).await.expect("get failed").unwrap();
         assert_eq!(stored.status, JobStatus::Failed);
         assert!(stored.error.as_ref().unwrap().contains("unknown stage"));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate stage queue name: stage1")]
+    fn duplicate_stage_panics() {
+        let _ = Pipeline::builder()
+            .stage("stage1", |x: i32| async move { Ok::<_, &str>(x) })
+            .stage("stage1", |x: i32| async move { Ok::<_, &str>(x * 2) })
+            .build();
     }
 }

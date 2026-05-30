@@ -185,9 +185,9 @@ use postmodern::{Queue, pipeline::Pipeline};
 # #[derive(serde::Serialize, serde::Deserialize)] struct Scan;
 # #[derive(serde::Serialize, serde::Deserialize)] struct Ocred;
 # #[derive(serde::Serialize, serde::Deserialize)] struct Classified;
-# async fn ocr(_: Scan) -> anyhow::Result<Ocred> { Ok(Ocred) }
-# async fn classify(_: Ocred) -> anyhow::Result<Classified> { Ok(Classified) }
-# async fn archive(_: Classified) -> anyhow::Result<()> { Ok(()) }
+# async fn ocr(_: Scan) -> Result<Ocred, std::io::Error> { Ok(Ocred) }
+# async fn classify(_: Ocred) -> Result<Classified, std::io::Error> { Ok(Classified) }
+# async fn archive(_: Classified) -> Result<(), std::io::Error> { Ok(()) }
 # async fn example(queue: Queue) {
 let pipeline = Pipeline::builder()
     .stage("docs:ocr", |s: Scan| async move { ocr(s).await })
@@ -203,7 +203,7 @@ queue
 # }
 ```
 
-Stage handlers return `Result<Out, anyhow::Error>`. On success, the job advances to the next stage (or commits if it's the final stage). On error, the job is soft-failed and will retry with backoff.
+Stage handlers return `Result<Out, E>` where `E: Display`. On success, the job advances to the next stage (or commits if it's the final stage). On error, the job is soft-failed and will retry with backoff. Stages must be idempotent — on crash, a stage may re-run.
 
 ## Reaper
 
