@@ -389,7 +389,7 @@ mod tests {
             .expect("unexpected duplicate");
 
         let (details, payload, ack) = queue
-            .pull_next("unknown")
+            .pull_next(&["unknown"])
             .await
             .expect("fetch failed")
             .expect("no job");

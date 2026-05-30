@@ -620,20 +620,34 @@ impl Queue {
         Ok(results)
     }
 
-    /// Pulls the next pending job from a queue, locking it for processing.
+    /// Gets the raw msgpack payload bytes for a job.
+    ///
+    /// Returns `None` if the job does not exist.
+    pub async fn get_job_payload(&self, id: Uuid) -> Result<Option<Vec<u8>>, ListError> {
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT payload FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(ListError::Query)?;
+
+        Ok(row.map(|(data,)| data))
+    }
+
+    /// Pulls the next pending job from the given queues, locking it for processing.
     ///
     /// Returns job details, raw payload bytes, and an acknowledgment handle. The job transitions
     /// to in_progress and must be resolved via the ack handle (commit, soft_fail, hard_fail, or
-    /// restart).
+    /// restart). Jobs are selected by priority (highest first), then creation time (oldest first).
+    /// Returns `None` if all queues are empty.
     pub async fn pull_next(
         &self,
-        queue: &str,
+        queues: &[&str],
     ) -> Result<Option<(JobDetails, Vec<u8>, job::JobAck)>, FetchError> {
         let lock_token = Uuid::now_v7();
         Ok(sqlx::query(
             "WITH selected AS ( \
                  SELECT id FROM jobs \
-                 WHERE queue = $1 AND status = 'pending' AND (lock IS NULL OR lock <= now()) \
+                 WHERE queue = ANY($1) AND status = 'pending' AND (lock IS NULL OR lock <= now()) \
                  ORDER BY priority DESC, created_at \
                  LIMIT 1 \
                  FOR UPDATE SKIP LOCKED \
@@ -644,7 +658,7 @@ impl Queue {
              RETURNING j.id, j.queue, j.status, j.description, j.created_at, j.key, j.lock, \
                        j.error, j.retry_count, j.priority, j.payload",
         )
-        .bind(queue)
+        .bind(queues)
         .bind(lock_token)
         .fetch_optional(&self.pool)
         .await
@@ -666,19 +680,6 @@ impl Queue {
             let ack = job::JobAck::new(details.id, self.pool.clone(), lock_token);
             (details, payload, ack)
         }))
-    }
-
-    /// Gets the raw msgpack payload bytes for a job.
-    ///
-    /// Returns `None` if the job does not exist.
-    pub async fn get_job_payload(&self, id: Uuid) -> Result<Option<Vec<u8>>, ListError> {
-        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT payload FROM jobs WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(ListError::Query)?;
-
-        Ok(row.map(|(data,)| data))
     }
 
     /// Restarts jobs, resetting them to pending state.

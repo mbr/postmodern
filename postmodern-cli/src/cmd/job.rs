@@ -100,7 +100,7 @@ pub async fn run(queue: &Queue, command: JobCommand) -> Result<()> {
             ack,
         } => {
             let (details, payload_bytes, job_ack) = queue
-                .pull_next(&queue_name)
+                .pull_next(&[queue_name.as_str()])
                 .await
                 .context("failed to get next job")?
                 .ok_or_else(|| anyhow::anyhow!("no pending jobs in queue '{queue_name}'"))?;
