@@ -100,6 +100,7 @@ Queues must be created before enqueueing jobs. A queue can be paused to prevent 
 queue.create_queue("tasks", false).await?;  // Returns true if created
 queue.pause_queue("tasks").await?;          // Returns count of paused jobs
 queue.resume_queue("tasks").await?;         // Returns count of resumed jobs
+queue.rename_queue("tasks", "jobs").await?; // Renames queue and all its jobs
 # Ok(())
 # }
 ```
@@ -208,6 +209,7 @@ Or pass `--db` on each invocation.
 - `pm queue delete <name>`: Delete a queue and all its jobs
 - `pm queue pause <name>`: Pause a queue
 - `pm queue resume <name>`: Resume a queue
+- `pm queue rename <from> <to>`: Rename a queue
 
 ### Job operations
 
