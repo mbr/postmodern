@@ -950,7 +950,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+        let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
 
         // hard_fail goes straight to Failed
         let job1 = stream.next().await.expect("no job").expect("fetch failed");

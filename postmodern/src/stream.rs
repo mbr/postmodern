@@ -22,12 +22,16 @@ impl Queue {
     /// Jobs are returned with raw payload bytes (no deserialization). The stream polls the database
     /// with exponential backoff when all queues are empty (up to 30s). Each fetched job is
     /// immediately marked as in-progress.
-    pub fn try_stream_raw(
+    pub fn try_stream_raw<I, S>(
         &self,
-        queues: &[&str],
-    ) -> impl Stream<Item = Result<(JobDetails, Vec<u8>, JobAck), FetchError>> + Send {
+        queues: I,
+    ) -> impl Stream<Item = Result<(JobDetails, Vec<u8>, JobAck), FetchError>> + Send
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let queue = self.clone();
-        let queues: Vec<String> = queues.iter().map(|s| s.to_string()).collect();
+        let queues: Vec<String> = queues.into_iter().map(Into::into).collect();
         unfold((queue, queues), |(queue, queues)| async move {
             let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
             let result = (|| poll_next_raw(&queue, &queue_refs))
@@ -54,10 +58,15 @@ impl Queue {
     /// The stream polls the database with exponential backoff when all queues are empty (up to 30s).
     /// After processing a job, backoff resets to zero for immediate polling. Each fetched job is
     /// immediately marked as in-progress.
-    pub fn try_stream_jobs<T: DeserializeOwned + Send + 'static>(
+    pub fn try_stream_jobs<T, I, S>(
         &self,
-        queues: &[&str],
-    ) -> impl Stream<Item = Result<PendingJob<T>, FetchError>> + Send {
+        queues: I,
+    ) -> impl Stream<Item = Result<PendingJob<T>, FetchError>> + Send
+    where
+        T: DeserializeOwned + Send + 'static,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         self.try_stream_raw(queues).map(|result| {
             result.and_then(|(details, payload, ack)| {
                 let payload: T = rmp_serde::from_slice(&payload)
@@ -71,12 +80,14 @@ impl Queue {
     ///
     /// Handles errors internally: query errors are logged and retried after a delay, deserialize
     /// errors cause the job to be marked as failed and skipped. Only yields valid jobs.
-    pub fn stream_jobs<T: DeserializeOwned + Send + 'static>(
-        &self,
-        queues: &[&str],
-    ) -> impl Stream<Item = PendingJob<T>> + Send {
+    pub fn stream_jobs<T, I, S>(&self, queues: I) -> impl Stream<Item = PendingJob<T>> + Send
+    where
+        T: DeserializeOwned + Send + 'static,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let queue = self.clone();
-        let queues: Vec<String> = queues.iter().map(|s| s.to_string()).collect();
+        let queues: Vec<String> = queues.into_iter().map(Into::into).collect();
         unfold((queue, queues), |(queue, queues)| async move {
             let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
             loop {
@@ -176,7 +187,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<String>(&["test"]));
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         assert_eq!(job.meta.id, id);
         assert_eq!(job.payload, "hello");
@@ -206,8 +217,8 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream1 = pin!(queue.try_stream_jobs::<i32>(&["test"]));
-        let mut stream2 = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+        let mut stream1 = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
+        let mut stream2 = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
 
         let job1 = stream1.next().await.expect("no job").expect("fetch failed");
         let job2 = stream2.next().await.expect("no job").expect("fetch failed");
@@ -227,7 +238,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+        let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         let (_, ack) = job.into_parts();
 
@@ -251,7 +262,7 @@ mod tests {
             .expect("unexpected duplicate");
 
         {
-            let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+            let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
             let job = stream.next().await.expect("no job").expect("fetch failed");
             let (_, _ack) = job.into_parts();
         }
@@ -299,7 +310,7 @@ mod tests {
             .await
             .expect("update failed");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+        let mut stream = pin!(queue.try_stream_jobs::<i32, _, _>(["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         job.into_parts()
             .1
