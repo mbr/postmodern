@@ -3,6 +3,39 @@
 //! Pipelines provide a layer on top of postmodern's job primitives for building multi-stage
 //! workflows. Each stage corresponds to a queue, and jobs advance atomically from one stage to
 //! the next.
+//!
+//! ```no_run
+//! use futures::StreamExt;
+//! use postmodern::{Queue, pipeline::Pipeline};
+//!
+//! # #[derive(serde::Serialize, serde::Deserialize)] struct Scan;
+//! # #[derive(serde::Serialize, serde::Deserialize)] struct Ocred;
+//! # #[derive(serde::Serialize, serde::Deserialize)] struct Classified;
+//! async fn ocr(_: Scan) -> anyhow::Result<Ocred> { Ok(Ocred) }
+//! async fn classify(_: Ocred) -> anyhow::Result<Classified> { Ok(Classified) }
+//! async fn archive(_: Classified) -> anyhow::Result<()> { Ok(()) }
+//!
+//! # async fn example(queue: Queue) {
+//! let pipeline = Pipeline::builder()
+//!     .stage("docs:ocr", |s: Scan| async move { ocr(s).await })
+//!     .stage("docs:classify", |o: Ocred| async move { classify(o).await })
+//!     .stage("docs:archive", |c: Classified| async move { archive(c).await })
+//!     .build();
+//!
+//! let queues: Vec<&str> = pipeline.queues().iter().map(|s| s.as_str()).collect();
+//! queue
+//!     .try_stream_jobs_from_raw(&queues)
+//!     .for_each_concurrent(16, |result| {
+//!         let pipeline = &pipeline;
+//!         async move {
+//!             if let Ok((details, payload, ack)) = result {
+//!                 let _ = pipeline.run(&details, payload, ack).await;
+//!             }
+//!         }
+//!     })
+//!     .await;
+//! # }
+//! ```
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
