@@ -22,23 +22,17 @@
 //!     .stage("docs:archive", |c: Classified| async move { archive(c).await })
 //!     .build();
 //!
-//! let queues: Vec<String> = pipeline.queues().to_vec();
 //! queue
-//!     .try_stream_raw(queues)
-//!     .for_each_concurrent(16, |result| {
-//!         let pipeline = &pipeline;
-//!         async move {
-//!             if let Ok((details, payload, ack)) = result {
-//!                 let _ = pipeline.run(&details, payload, ack).await;
-//!             }
-//!         }
-//!     })
+//!     .stream_pipeline(&pipeline)
+//!     .for_each_concurrent(16, |(details, payload, ack)|
+//!         pipeline.dispatch(details, payload, ack))
 //!     .await;
 //! # }
 //! ```
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
+use display_full_error::DisplayFullErrorExt;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -132,8 +126,8 @@ impl Pipeline {
         }
     }
 
-    /// Dispatches a job to its stage handler.
-    async fn dispatch(&self, queue: &str, payload: Vec<u8>) -> Outcome {
+    /// Runs the stage handler for a queue.
+    async fn run_stage(&self, queue: &str, payload: Vec<u8>) -> Outcome {
         let entry = match self.stages.get(queue) {
             Some(e) => e,
             None => return Outcome::Fail(format!("unknown stage: {queue}")),
@@ -160,7 +154,7 @@ impl Pipeline {
         payload: Vec<u8>,
         ack: JobAck,
     ) -> Result<(), PipelineError> {
-        match self.dispatch(&details.queue, payload).await {
+        match self.run_stage(&details.queue, payload).await {
             Outcome::Advance { queue, payload } => {
                 ack.advance(&queue, &payload, AdvanceOptions::default())
                     .await
@@ -177,6 +171,23 @@ impl Pipeline {
             }
         }
         Ok(())
+    }
+
+    /// Processes a job through the pipeline, logging errors.
+    ///
+    /// Like [`run`](Self::run), but errors are logged instead of returned. Use with
+    /// [`Queue::stream_pipeline`](crate::Queue::stream_pipeline) for fire-and-forget processing:
+    ///
+    /// ```ignore
+    /// queue.stream_pipeline(&pipeline)
+    ///     .for_each_concurrent(16, |(details, payload, ack)|
+    ///         pipeline.dispatch(details, payload, ack))
+    ///     .await;
+    /// ```
+    pub async fn dispatch(&self, details: JobDetails, payload: Vec<u8>, ack: JobAck) {
+        if let Err(e) = self.run(&details, payload, ack).await {
+            tracing::error!(id = %details.id, queue = %details.queue, error = %e.display_full(), "pipeline error");
+        }
     }
 
     /// Returns the queue names this pipeline handles.

@@ -174,6 +174,38 @@ ack.commit().await?;
 
 Soft failures trigger exponential backoff: immediate retry on first failure, then 25min, 50min, 100min, etc. After 8 retries (~53 hours total), the job transitions to `Failed`. Use `hard_fail` for unrecoverable errors that should not be retried.
 
+## Pipelines
+
+For multi-stage workflows, the `pipeline` module provides sequential durable processing. Each stage corresponds to a queue, and jobs advance atomically from one stage to the next:
+
+```rust,no_run
+use futures::StreamExt;
+use postmodern::{Queue, pipeline::Pipeline};
+
+# #[derive(serde::Serialize, serde::Deserialize)] struct Scan;
+# #[derive(serde::Serialize, serde::Deserialize)] struct Ocred;
+# #[derive(serde::Serialize, serde::Deserialize)] struct Classified;
+# async fn ocr(_: Scan) -> anyhow::Result<Ocred> { Ok(Ocred) }
+# async fn classify(_: Ocred) -> anyhow::Result<Classified> { Ok(Classified) }
+# async fn archive(_: Classified) -> anyhow::Result<()> { Ok(()) }
+# async fn example(queue: Queue) {
+let pipeline = Pipeline::builder()
+    .stage("docs:ocr", |s: Scan| async move { ocr(s).await })
+    .stage("docs:classify", |o: Ocred| async move { classify(o).await })
+    .stage("docs:archive", |c: Classified| async move { archive(c).await })
+    .build();
+
+// Process jobs from all pipeline stages concurrently
+queue
+    .stream_pipeline(&pipeline)
+    .for_each_concurrent(16, |(details, payload, ack)|
+        pipeline.dispatch(details, payload, ack))
+    .await;
+# }
+```
+
+Stage handlers return `Result<Out, anyhow::Error>`. On success, the job advances to the next stage (or commits if it's the final stage). On error, the job is soft-failed and will retry with backoff.
+
 ## Reaper
 
 Jobs stuck in `in_progress` (e.g., after worker crash) must be reaped. The reaper soft-fails expired jobs, respecting retry limits:
