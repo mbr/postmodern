@@ -73,7 +73,7 @@ queue.create_queue("tasks", false).await?;
 let id = queue.enqueue("tasks", payload, EnqueueOptions::default()).await?;
 
 // Process jobs
-let mut stream = pin!(queue.try_stream_jobs::<MyPayload>("tasks"));
+let mut stream = pin!(queue.try_stream_jobs::<MyPayload>(&["tasks"]));
 while let Some(result) = stream.next().await {
     let job = result?;
     let (payload, ack) = job.into_parts();

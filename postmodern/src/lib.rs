@@ -74,6 +74,19 @@ pub struct JobDetails {
     pub priority: i64,
 }
 
+impl From<JobDetails> for job::JobMetadata {
+    fn from(d: JobDetails) -> Self {
+        Self {
+            id: d.id,
+            queue: d.queue,
+            description: d.description,
+            status: d.status,
+            created_at: d.created_at,
+            priority: d.priority,
+        }
+    }
+}
+
 /// Filter options for listing jobs.
 #[derive(Clone, Debug, Default)]
 pub struct JobFilter {
@@ -128,11 +141,6 @@ impl Queue {
             .await
             .map_err(ConnectError::Migration)?;
         Ok(Self { pool })
-    }
-
-    /// Creates a queue from a pool without running migrations.
-    pub(crate) fn from_pool_unchecked(pool: PgPool) -> Self {
-        Self { pool }
     }
 
     /// Enqueues a job with the given payload.
@@ -215,8 +223,15 @@ impl Queue {
         .await
         .map_err(FetchError::Query)?;
 
-        row.map(|r| row_to_pending_job(r, self.pool.clone(), lock_token))
-            .transpose()
+        row.map(|r| {
+            let meta = JobMetadata::from_row(&r).map_err(FetchError::Query)?;
+            let payload_bytes: Vec<u8> = r.get("payload");
+            let payload: T = rmp_serde::from_slice(&payload_bytes)
+                .map_err(|e| FetchError::Deserialize(meta.id, e))?;
+            let ack = job::JobAck::new(meta.id, self.pool.clone(), lock_token);
+            Ok(PendingJob::from_raw(meta, payload, ack))
+        })
+        .transpose()
     }
 
     /// Returns a reference to the underlying connection pool.
@@ -881,53 +896,6 @@ impl Queue {
     }
 }
 
-/// Converts a row containing job metadata and payload into a [`PendingJob`].
-fn row_to_pending_job<T: DeserializeOwned>(
-    row: PgRow,
-    pool: PgPool,
-    lock_token: Uuid,
-) -> Result<PendingJob<T>, FetchError> {
-    let meta = JobMetadata::from_row(&row).map_err(FetchError::Query)?;
-    let payload_bytes: Vec<u8> = row.get("payload");
-    let payload: T =
-        rmp_serde::from_slice(&payload_bytes).map_err(|e| FetchError::Deserialize(meta.id, e))?;
-    Ok(PendingJob {
-        meta,
-        payload,
-        pool,
-        lock_token,
-    })
-}
-
-/// Fetches the next pending job from the queue, marking it as in-progress.
-pub(crate) async fn next_pending_job<T: DeserializeOwned>(
-    pool: &PgPool,
-    queue: &str,
-) -> Result<Option<PendingJob<T>>, FetchError> {
-    let lock_token = Uuid::now_v7();
-    let row: Option<PgRow> = sqlx::query(
-        "WITH selected AS ( \
-             SELECT id FROM jobs \
-             WHERE queue = $1 AND status = 'pending' AND (lock IS NULL OR lock <= now()) \
-             ORDER BY priority DESC, created_at \
-             LIMIT 1 \
-             FOR UPDATE SKIP LOCKED \
-         ) \
-         UPDATE jobs j SET status = 'in_progress', lock = now(), lock_token = $2 \
-         FROM selected s \
-         WHERE j.id = s.id \
-         RETURNING j.id, j.queue, j.description, j.status, j.created_at, j.priority, j.payload",
-    )
-    .bind(queue)
-    .bind(lock_token)
-    .fetch_optional(pool)
-    .await
-    .map_err(FetchError::Query)?;
-
-    row.map(|r| row_to_pending_job(r, pool.clone(), lock_token))
-        .transpose()
-}
-
 /// Converts a database row to (JobDetails, payload bytes).
 fn row_to_job_payload(row: PgRow) -> (JobDetails, Vec<u8>) {
     let details = JobDetails {
@@ -982,7 +950,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
+        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
 
         // hard_fail goes straight to Failed
         let job1 = stream.next().await.expect("no job").expect("fetch failed");

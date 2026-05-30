@@ -91,19 +91,21 @@ pub struct PendingJob<T> {
     pub meta: JobMetadata,
     /// Deserialized payload.
     pub payload: T,
-    /// Connection pool for acknowledgment operations.
-    pub(crate) pool: PgPool,
-    /// Lock token for this checkout.
-    pub(crate) lock_token: Uuid,
+    /// Acknowledgment handle.
+    ack: JobAck,
 }
 
 impl<T> PendingJob<T> {
+    /// Creates a pending job from raw parts.
+    pub(crate) fn from_raw(meta: JobMetadata, payload: T, ack: JobAck) -> Self {
+        Self { meta, payload, ack }
+    }
+
     /// Separates the payload from the acknowledgment handle.
     ///
     /// Returns the payload and a [`JobAck`] for signaling completion, failure, or retry.
     pub fn into_parts(self) -> (T, JobAck) {
-        let ack = JobAck::new(self.meta.id, self.pool, self.lock_token);
-        (self.payload, ack)
+        (self.payload, self.ack)
     }
 
     /// Runs a function with the payload and acknowledges the job based on its result.

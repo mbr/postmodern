@@ -4,29 +4,33 @@ use std::time::Duration;
 
 use backon::{BackoffBuilder, ExponentialBuilder, Retryable};
 use display_full_error::DisplayFullErrorExt;
-use futures::{stream::unfold, Stream};
+use futures::{stream::unfold, Stream, StreamExt};
 use serde::de::DeserializeOwned;
-use sqlx::PgPool;
 
-use crate::{error::FetchError, job::PendingJob, next_pending_job, Queue};
+use crate::{
+    error::FetchError,
+    job::{JobAck, PendingJob},
+    JobDetails, Queue,
+};
 
 /// Default delay after a query error before retrying.
 const QUERY_ERROR_DELAY: Duration = Duration::from_secs(5);
 
 impl Queue {
-    /// Returns a fallible stream of pending jobs from the specified queue.
+    /// Returns a fallible stream of raw jobs from the given queues.
     ///
-    /// The stream polls the database with exponential backoff when the queue is empty (up to 30s).
-    /// After processing a job, backoff resets to zero for immediate polling. Each fetched job is
+    /// Jobs are returned with raw payload bytes (no deserialization). The stream polls the database
+    /// with exponential backoff when all queues are empty (up to 30s). Each fetched job is
     /// immediately marked as in-progress.
-    pub fn try_stream_jobs<T: DeserializeOwned + Send + 'static>(
+    pub fn try_stream_raw(
         &self,
-        queue: &str,
-    ) -> impl Stream<Item = Result<PendingJob<T>, FetchError>> + Send {
-        let pool = self.pool.clone();
-        let queue = queue.to_string();
-        unfold((pool, queue), |(pool, queue)| async move {
-            let result = (|| poll_next_job(&pool, &queue))
+        queues: &[&str],
+    ) -> impl Stream<Item = Result<(JobDetails, Vec<u8>, JobAck), FetchError>> + Send {
+        let queue = self.clone();
+        let queues: Vec<String> = queues.iter().map(|s| s.to_string()).collect();
+        unfold((queue, queues), |(queue, queues)| async move {
+            let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
+            let result = (|| poll_next_raw(&queue, &queue_refs))
                 .retry(
                     ExponentialBuilder::default()
                         .with_min_delay(Duration::from_millis(100))
@@ -38,26 +42,45 @@ impl Queue {
                 .await;
 
             match result {
-                Ok(job) => Some((Ok(job), (pool, queue))),
+                Ok(job) => Some((Ok(job), (queue, queues))),
                 Err(StreamError::Empty) => unreachable!("infinite retry"),
-                Err(StreamError::Fetch(e)) => Some((Err(e), (pool, queue))),
+                Err(StreamError::Fetch(e)) => Some((Err(e), (queue, queues))),
             }
         })
     }
 
-    /// Returns a stream of pending jobs from the specified queue.
+    /// Returns a fallible stream of pending jobs from the given queues.
+    ///
+    /// The stream polls the database with exponential backoff when all queues are empty (up to 30s).
+    /// After processing a job, backoff resets to zero for immediate polling. Each fetched job is
+    /// immediately marked as in-progress.
+    pub fn try_stream_jobs<T: DeserializeOwned + Send + 'static>(
+        &self,
+        queues: &[&str],
+    ) -> impl Stream<Item = Result<PendingJob<T>, FetchError>> + Send {
+        self.try_stream_raw(queues).map(|result| {
+            result.and_then(|(details, payload, ack)| {
+                let payload: T = rmp_serde::from_slice(&payload)
+                    .map_err(|e| FetchError::Deserialize(details.id, e))?;
+                Ok(PendingJob::from_raw(details.into(), payload, ack))
+            })
+        })
+    }
+
+    /// Returns a stream of pending jobs from the given queues.
     ///
     /// Handles errors internally: query errors are logged and retried after a delay, deserialize
     /// errors cause the job to be marked as failed and skipped. Only yields valid jobs.
     pub fn stream_jobs<T: DeserializeOwned + Send + 'static>(
         &self,
-        queue: &str,
+        queues: &[&str],
     ) -> impl Stream<Item = PendingJob<T>> + Send {
-        let pool = self.pool.clone();
-        let queue_name = queue.to_string();
-        unfold((pool, queue_name), |(pool, queue_name)| async move {
+        let queue = self.clone();
+        let queues: Vec<String> = queues.iter().map(|s| s.to_string()).collect();
+        unfold((queue, queues), |(queue, queues)| async move {
+            let queue_refs: Vec<&str> = queues.iter().map(|s| s.as_str()).collect();
             loop {
-                let result = (|| poll_next_job(&pool, &queue_name))
+                let result = (|| poll_next_raw(&queue, &queue_refs))
                     .retry(
                         ExponentialBuilder::default()
                             .with_min_delay(Duration::from_millis(100))
@@ -69,23 +92,33 @@ impl Queue {
                     .await;
 
                 match result {
-                    Ok(job) => return Some((job, (pool, queue_name))),
+                    Ok((details, payload, ack)) => {
+                        let id = details.id;
+                        match rmp_serde::from_slice::<T>(&payload) {
+                            Ok(payload) => {
+                                let job = PendingJob::from_raw(details.into(), payload, ack);
+                                return Some((job, (queue, queues)));
+                            }
+                            Err(e) => {
+                                tracing::error!(%id, error = %e.display_full(), "deserialization failed, marking job as failed");
+                                if let Err(fail_err) =
+                                    queue.fail_jobs(&[id], &e.to_string_full()).await
+                                {
+                                    tracing::warn!(
+                                        %id, error = %fail_err.display_full(),
+                                        "failed to mark job as failed, reaper will handle"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Err(StreamError::Empty) => unreachable!("infinite retry"),
                     Err(StreamError::Fetch(FetchError::Query(e))) => {
                         tracing::warn!(error = %e.display_full(), "query error, retrying");
                         tokio::time::sleep(QUERY_ERROR_DELAY).await;
                     }
-                    Err(StreamError::Fetch(FetchError::Deserialize(id, e))) => {
-                        tracing::error!(%id, error = %e.display_full(), "deserialization failed, marking job as failed");
-                        if let Err(fail_err) = crate::Queue::from_pool_unchecked(pool.clone())
-                            .fail_jobs(&[id], &e.to_string_full())
-                            .await
-                        {
-                            tracing::warn!(
-                                %id, error = %fail_err.display_full(),
-                                "failed to mark job as failed, reaper will handle"
-                            );
-                        }
+                    Err(StreamError::Fetch(FetchError::Deserialize(_, _))) => {
+                        unreachable!("raw stream does not deserialize")
                     }
                 }
             }
@@ -102,11 +135,11 @@ enum StreamError {
 }
 
 /// Wrapper that converts `Ok(None)` to `Err(StreamError::Empty)` for retry.
-async fn poll_next_job<T: DeserializeOwned>(
-    pool: &PgPool,
-    queue: &str,
-) -> Result<PendingJob<T>, StreamError> {
-    match next_pending_job(pool, queue).await {
+async fn poll_next_raw(
+    queue: &Queue,
+    queues: &[&str],
+) -> Result<(JobDetails, Vec<u8>, JobAck), StreamError> {
+    match queue.pull_next(queues).await {
         Ok(Some(job)) => Ok(job),
         Ok(None) => Err(StreamError::Empty),
         Err(e) => Err(StreamError::Fetch(e)),
@@ -143,7 +176,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<String>("test"));
+        let mut stream = pin!(queue.try_stream_jobs::<String>(&["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         assert_eq!(job.meta.id, id);
         assert_eq!(job.payload, "hello");
@@ -173,8 +206,8 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream1 = pin!(queue.try_stream_jobs::<i32>("test"));
-        let mut stream2 = pin!(queue.try_stream_jobs::<i32>("test"));
+        let mut stream1 = pin!(queue.try_stream_jobs::<i32>(&["test"]));
+        let mut stream2 = pin!(queue.try_stream_jobs::<i32>(&["test"]));
 
         let job1 = stream1.next().await.expect("no job").expect("fetch failed");
         let job2 = stream2.next().await.expect("no job").expect("fetch failed");
@@ -194,7 +227,7 @@ mod tests {
             .expect("enqueue failed")
             .expect("unexpected duplicate");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
+        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         let (_, ack) = job.into_parts();
 
@@ -218,7 +251,7 @@ mod tests {
             .expect("unexpected duplicate");
 
         {
-            let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
+            let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
             let job = stream.next().await.expect("no job").expect("fetch failed");
             let (_, _ack) = job.into_parts();
         }
@@ -266,7 +299,7 @@ mod tests {
             .await
             .expect("update failed");
 
-        let mut stream = pin!(queue.try_stream_jobs::<i32>("test"));
+        let mut stream = pin!(queue.try_stream_jobs::<i32>(&["test"]));
         let job = stream.next().await.expect("no job").expect("fetch failed");
         job.into_parts()
             .1

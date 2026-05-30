@@ -24,7 +24,7 @@
 //!
 //! let queues: Vec<&str> = pipeline.queues().iter().map(|s| s.as_str()).collect();
 //! queue
-//!     .try_stream_jobs_from_raw(&queues)
+//!     .try_stream_raw(&queues)
 //!     .for_each_concurrent(16, |result| {
 //!         let pipeline = &pipeline;
 //!         async move {
@@ -285,7 +285,7 @@ mod tests {
 
         let queue_refs: Vec<&str> = pipeline.queues().iter().map(|s| s.as_str()).collect();
 
-        let mut stream = pin!(queue.try_stream_jobs_from_raw(&queue_refs));
+        let mut stream = pin!(queue.try_stream_raw(&queue_refs));
 
         let (details, payload, ack) = stream.next().await.expect("no job").expect("fetch failed");
         assert_eq!(details.id, id);
@@ -350,7 +350,7 @@ mod tests {
             .expect("unexpected duplicate");
 
         let queue_refs: Vec<&str> = pipeline.queues().iter().map(|s| s.as_str()).collect();
-        let mut stream = pin!(queue.try_stream_jobs_from_raw(&queue_refs));
+        let mut stream = pin!(queue.try_stream_raw(&queue_refs));
 
         let (details, payload, ack) = stream.next().await.expect("no job").expect("fetch failed");
         assert_eq!(details.id, id);
