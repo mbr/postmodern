@@ -98,3 +98,14 @@ pub enum ResolveIdError {
         matches: String,
     },
 }
+
+/// Errors from advancing to the next pipeline stage.
+#[derive(Debug, thiserror::Error)]
+pub enum AdvanceError {
+    /// Database operation failed.
+    #[error("database error")]
+    Database(#[source] sqlx::Error),
+    /// Advance failed because lock was lost or target queue not found.
+    #[error("advance failed (lock lost or queue not found)")]
+    Failed,
+}

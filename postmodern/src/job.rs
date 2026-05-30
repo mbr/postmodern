@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::AckError;
+use crate::error::{AckError, AdvanceError};
 
 /// Duration before an in-progress job is considered crashed and eligible for reaping.
 ///
@@ -54,6 +54,15 @@ pub enum InitialState {
     Pending,
     /// Job is paused and must be unpaused before processing (ignores queue state).
     Paused,
+}
+
+/// Options for advancing to the next pipeline stage.
+#[derive(Clone, Debug, Default)]
+pub struct AdvanceOptions {
+    /// Human-readable description for the new job.
+    pub description: Option<String>,
+    /// Priority for ordering (higher = more urgent).
+    pub priority: i64,
 }
 
 /// Job metadata without the payload.
@@ -198,6 +207,48 @@ impl JobAck {
     pub async fn restart(mut self) -> Result<(), AckError> {
         let pool = self.pool.take().expect("ack already consumed");
         mark_restarted(&pool, self.id, self.lock_token).await
+    }
+
+    /// Atomically commits this job and enqueues a new job in the next stage.
+    ///
+    /// Respects the target queue's paused state. Returns the new job's ID on success.
+    pub async fn advance(
+        mut self,
+        next_queue: &str,
+        payload: &[u8],
+        options: AdvanceOptions,
+    ) -> Result<Uuid, AdvanceError> {
+        let pool = self.pool.take().expect("ack already consumed");
+        let next_id = Uuid::now_v7();
+
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            "WITH finished AS ( \
+                 UPDATE jobs SET status = 'finished', lock = now(), lock_token = NULL \
+                 WHERE id = $1 AND lock_token = $2 \
+                 RETURNING id \
+             ), \
+             target_queue AS ( \
+                 SELECT paused FROM queues WHERE queue = $3 \
+             ) \
+             INSERT INTO jobs (id, queue, status, payload, priority, description) \
+             SELECT $4, $3, \
+                    CASE WHEN q.paused THEN 'paused'::job_status ELSE 'pending'::job_status END, \
+                    $5, $6, $7 \
+             FROM finished f, target_queue q \
+             RETURNING id",
+        )
+        .bind(self.id)
+        .bind(self.lock_token)
+        .bind(next_queue)
+        .bind(next_id)
+        .bind(payload)
+        .bind(options.priority)
+        .bind(&options.description)
+        .fetch_optional(&pool)
+        .await
+        .map_err(AdvanceError::Database)?;
+
+        row.map(|(id,)| id).ok_or(AdvanceError::Failed)
     }
 
     /// Consumes the handle without taking any action.
