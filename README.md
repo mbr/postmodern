@@ -174,6 +174,48 @@ ack.commit().await?;
 
 Soft failures trigger exponential backoff: immediate retry on first failure, then 25min, 50min, 100min, etc. After 8 retries (~53 hours total), the job transitions to `Failed`. Use `hard_fail` for unrecoverable errors that should not be retried.
 
+## Checkpoints
+
+For long-running jobs with expensive steps, checkpoints provide [Absurd](https://github.com/earendil-works/absurd)-style durable execution. Completed checkpoints are memoized—on retry, they return the stored value without re-executing:
+
+```rust,no_run
+use postmodern::Queue;
+use futures::StreamExt;
+use std::{convert::Infallible, pin::pin};
+# async fn download(url: &str) -> Vec<u8> { vec![] }
+# async fn ocr(data: &[u8]) -> String { String::new() }
+# async fn store(text: &str) {}
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# let queue = Queue::connect("postgres://...").await?;
+
+let mut stream = pin!(queue.stream_jobs::<String, _, _>(["ingest"]));
+while let Some(job) = stream.next().await {
+    let (_meta, url, mut ack) = job.into_parts();
+
+    // If we crash after download but before OCR, retry skips the download
+    let pdf: Vec<u8> = ack.checkpoint("download", || async {
+        Ok::<_, Infallible>(download(&url).await)
+    }).await?;
+
+    let text: String = ack.checkpoint("ocr", || async {
+        Ok::<_, Infallible>(ocr(&pdf).await)
+    }).await?;
+
+    store(&text).await;
+    ack.commit().await?;
+}
+# Ok(())
+# }
+```
+
+Checkpoints provide **at-least-once** execution—a crash between a side effect and its storage causes the closure to re-run. For loops, use `checkpoint_seq` (sequenced by encounter order) or compose unique names with a stable key:
+
+```rust,ignore
+for item in items {
+    ack.checkpoint(&format!("process-{}", item.id), || async { ... }).await?;
+}
+```
+
 ## Pipelines
 
 For multi-stage workflows, the `pipeline` module provides sequential durable processing. Each stage corresponds to a queue, and jobs advance atomically from one stage to the next:
