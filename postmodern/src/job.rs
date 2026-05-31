@@ -1,12 +1,13 @@
 //! Job types and acknowledgment handles.
 
-use std::{fmt::Display, future::Future, time::Duration};
+use std::{collections::HashMap, fmt::Display, future::Future, time::Duration};
 
 use chrono::{DateTime, Utc};
+use serde::{de::DeserializeOwned, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::{AckError, AdvanceError};
+use crate::error::{AckError, AdvanceError, CheckpointError};
 
 /// Duration before an in-progress job is considered crashed and eligible for reaping.
 ///
@@ -153,6 +154,8 @@ pub struct JobAck {
     pool: Option<PgPool>,
     /// Lock token for this checkout.
     lock_token: Uuid,
+    /// Tracks checkpoint encounter count within this execution (name → count).
+    encounters: HashMap<String, u32>,
 }
 
 impl JobAck {
@@ -162,6 +165,7 @@ impl JobAck {
             id,
             pool: Some(pool),
             lock_token,
+            encounters: HashMap::new(),
         }
     }
 
@@ -281,6 +285,148 @@ impl JobAck {
             return Err(AckError::LockLost);
         }
         Ok(())
+    }
+
+    /// Creates a checkpoint that memoizes work across retries.
+    ///
+    /// On first encounter, runs the closure and stores the result. On replay (retry after
+    /// failure), returns the stored value without executing the closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::DuplicateCheckpoint`] if called twice with the same name in one
+    /// execution. Returns [`CheckpointError::LockLost`] if the job lock was lost before the
+    /// checkpoint could be written. Returns [`CheckpointError::Closure`] if the closure returns
+    /// `Err` (nothing is stored, next attempt re-runs the closure).
+    pub async fn checkpoint<T, F, Fut, E>(
+        &mut self,
+        name: &str,
+        f: F,
+    ) -> Result<T, CheckpointError<E>>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let pool = self.pool.as_ref().expect("ack already consumed");
+
+        // Track encounters within this execution
+        let count = self.encounters.entry(name.to_string()).or_insert(0);
+        if *count > 0 {
+            return Err(CheckpointError::DuplicateCheckpoint(name.to_string()));
+        }
+        *count += 1;
+
+        // Check for existing checkpoint from prior run (replay hit)
+        let existing: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT value FROM checkpoints WHERE job_id = $1 AND name = $2 AND seq = 0",
+        )
+        .bind(self.id)
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .map_err(CheckpointError::Database)?;
+
+        if let Some((bytes,)) = existing {
+            return rmp_serde::from_slice(&bytes).map_err(CheckpointError::Deserialize);
+        }
+
+        // First execution: run the closure
+        let value = f().await.map_err(CheckpointError::Closure)?;
+
+        // Serialize the result
+        let bytes = rmp_serde::to_vec_named(&value).map_err(CheckpointError::Serialize)?;
+
+        // Store checkpoint, but only if we still hold the lock.
+        // If lock was lost (reaper reclaimed, another worker took over) or another writer
+        // raced us, this INSERT will affect 0 rows and we return LockLost.
+        let result = sqlx::query(
+            "INSERT INTO checkpoints (job_id, name, seq, value) \
+             SELECT $1, $2, 0, $3 FROM jobs WHERE id = $1 AND lock_token = $4 \
+             ON CONFLICT (job_id, name, seq) DO NOTHING",
+        )
+        .bind(self.id)
+        .bind(name)
+        .bind(&bytes)
+        .bind(self.lock_token)
+        .execute(pool)
+        .await
+        .map_err(CheckpointError::Database)?;
+
+        if result.rows_affected() == 0 {
+            return Err(CheckpointError::LockLost);
+        }
+
+        Ok(value)
+    }
+
+    /// Creates a sequenced checkpoint for deliberate recurrence (loops).
+    ///
+    /// Unlike [`checkpoint`](Self::checkpoint), allows the same name multiple times within a
+    /// single execution. Each encounter gets an incrementing sequence number (0, 1, 2, ...).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::LockLost`] if the job lock was lost before the checkpoint could
+    /// be written. Returns [`CheckpointError::Closure`] if the closure returns `Err`.
+    pub async fn checkpoint_seq<T, F, Fut, E>(
+        &mut self,
+        name: &str,
+        f: F,
+    ) -> Result<T, CheckpointError<E>>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        let pool = self.pool.as_ref().expect("ack already consumed");
+
+        // Get current sequence (before increment) and then increment
+        let count = self.encounters.entry(name.to_string()).or_insert(0);
+        let seq = *count;
+        *count += 1;
+
+        // Check for existing checkpoint from prior run (replay hit)
+        let existing: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT value FROM checkpoints WHERE job_id = $1 AND name = $2 AND seq = $3",
+        )
+        .bind(self.id)
+        .bind(name)
+        .bind(seq as i32)
+        .fetch_optional(pool)
+        .await
+        .map_err(CheckpointError::Database)?;
+
+        if let Some((bytes,)) = existing {
+            return rmp_serde::from_slice(&bytes).map_err(CheckpointError::Deserialize);
+        }
+
+        // First execution: run the closure
+        let value = f().await.map_err(CheckpointError::Closure)?;
+
+        // Serialize the result
+        let bytes = rmp_serde::to_vec_named(&value).map_err(CheckpointError::Serialize)?;
+
+        // Store checkpoint, but only if we still hold the lock.
+        let result = sqlx::query(
+            "INSERT INTO checkpoints (job_id, name, seq, value) \
+             SELECT $1, $2, $3, $4 FROM jobs WHERE id = $1 AND lock_token = $5 \
+             ON CONFLICT (job_id, name, seq) DO NOTHING",
+        )
+        .bind(self.id)
+        .bind(name)
+        .bind(seq as i32)
+        .bind(&bytes)
+        .bind(self.lock_token)
+        .execute(pool)
+        .await
+        .map_err(CheckpointError::Database)?;
+
+        if result.rows_affected() == 0 {
+            return Err(CheckpointError::LockLost);
+        }
+
+        Ok(value)
     }
 
     /// Runs a future and acknowledges the job based on its result.
@@ -443,4 +589,390 @@ async fn mark_restarted(pool: &PgPool, id: Uuid, lock_token: Uuid) -> Result<(),
         return Err(AckError::LockLost);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{convert::Infallible, pin::pin, sync::atomic::AtomicU32};
+
+    use futures::StreamExt;
+
+    use crate::{EnqueueOptions, Queue};
+
+    async fn setup_db() -> (Queue, pgdb::DbInstance) {
+        let db_url = pgdb::db_fixture();
+        let queue = Queue::connect(db_url.as_str())
+            .await
+            .expect("failed to connect to test database");
+        queue
+            .create_queue("test", false)
+            .await
+            .expect("failed to create test queue");
+        (queue, db_url)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_then_skip() {
+        use std::sync::atomic::Ordering;
+
+        let (queue, _db) = setup_db().await;
+        static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+        let _id = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First execution: checkpoint runs the closure
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let result: i32 = ack
+            .checkpoint("step", || async {
+                CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Infallible>(42)
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
+
+        // Soft-fail to trigger a retry
+        ack.soft_fail("simulated failure").await.unwrap();
+
+        // Second execution (replay): checkpoint returns stored value without running closure
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let result: i32 = ack
+            .checkpoint("step", || async {
+                CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Infallible>(99) // different value, but should return stored 42
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 42); // stored value from first run
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1); // closure not called again
+
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_intra_run_duplicate() {
+        let (queue, _db) = setup_db().await;
+
+        let _ = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        // First call succeeds
+        let _: i32 = ack
+            .checkpoint("dup", || async { Ok::<_, Infallible>(1) })
+            .await
+            .unwrap();
+
+        // Second call with same name in same execution errors
+        let err = ack
+            .checkpoint("dup", || async { Ok::<_, Infallible>(2) })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::CheckpointError::DuplicateCheckpoint(name) if name == "dup"
+        ));
+
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_replay_not_duplicate() {
+        // Cross-run replay should NOT be treated as a duplicate
+        let (queue, _db) = setup_db().await;
+
+        let _ = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First execution
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let _: i32 = ack
+            .checkpoint("step", || async { Ok::<_, Infallible>(1) })
+            .await
+            .unwrap();
+
+        ack.soft_fail("retry").await.unwrap();
+
+        // Second execution (replay)
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        // This should succeed (replay hit), not error as duplicate
+        let result: i32 = ack
+            .checkpoint("step", || async { Ok::<_, Infallible>(2) })
+            .await
+            .unwrap();
+
+        assert_eq!(result, 1); // returns stored value, not the closure's 2
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_seq_loop() {
+        use std::sync::atomic::Ordering;
+
+        let (queue, _db) = setup_db().await;
+        static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+        let _ = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First execution: process items 0, 1, then fail
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        for i in 0..2 {
+            let result: i32 = ack
+                .checkpoint_seq("item", || async move {
+                    CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Infallible>(i * 10)
+                })
+                .await
+                .unwrap();
+            assert_eq!(result, i * 10);
+        }
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 2);
+
+        ack.soft_fail("crash at item 2").await.unwrap();
+
+        // Second execution (replay): items 0, 1 are cached; items 2, 3 run fresh
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        for i in 0..4 {
+            let result: i32 = ack
+                .checkpoint_seq("item", || async move {
+                    CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Infallible>(i * 10)
+                })
+                .await
+                .unwrap();
+            assert_eq!(result, i * 10);
+        }
+        // Only items 2, 3 ran their closures (2 more calls)
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 4);
+
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_keyed() {
+        let (queue, _db) = setup_db().await;
+
+        let _ = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        // Distinct keys work fine
+        for id in ["a", "b", "c"] {
+            let _: String = ack
+                .checkpoint(&format!("fetch-{id}"), || async move {
+                    Ok::<_, Infallible>(format!("result-{id}"))
+                })
+                .await
+                .unwrap();
+        }
+
+        // Repeated key in same execution errors
+        let err = ack
+            .checkpoint("fetch-a", || async { Ok::<_, Infallible>("x".to_string()) })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::CheckpointError::DuplicateCheckpoint(name) if name == "fetch-a"
+        ));
+
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_error_stores_nothing() {
+        use std::sync::atomic::Ordering;
+
+        let (queue, _db) = setup_db().await;
+        static CALL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+        let id = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // First execution: closure errors
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let err = ack
+            .checkpoint("failing", || async {
+                CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                Err::<i32, _>("oops")
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::CheckpointError::Closure(msg) if msg == "oops"
+        ));
+
+        // Verify no checkpoint was stored
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM checkpoints WHERE job_id = $1")
+            .bind(id)
+            .fetch_one(queue.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+
+        ack.soft_fail("retry after error").await.unwrap();
+
+        // Second execution: closure runs again (not cached)
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let result: i32 = ack
+            .checkpoint("failing", || async {
+                CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, &str>(42) // succeed this time
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, 42);
+        assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 2); // closure ran twice
+
+        ack.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cascade_delete() {
+        let (queue, _db) = setup_db().await;
+
+        let id = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut stream = pin!(queue.try_stream_jobs::<String, _, _>(["test"]));
+        let job = stream.next().await.unwrap().unwrap();
+        let (_, _, mut ack) = job.into_parts();
+
+        let _: i32 = ack
+            .checkpoint("step", || async { Ok::<_, Infallible>(1) })
+            .await
+            .unwrap();
+
+        ack.commit().await.unwrap();
+
+        // Verify checkpoint exists
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM checkpoints WHERE job_id = $1")
+            .bind(id)
+            .fetch_one(queue.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+
+        // Delete the job
+        queue.delete_jobs(&[id]).await.unwrap();
+
+        // Verify checkpoint was cascade-deleted
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM checkpoints WHERE job_id = $1")
+            .bind(id)
+            .fetch_one(queue.pool())
+            .await
+            .unwrap();
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_lock_lost_on_stale_token() {
+        // Simulates: Worker A is processing, lock expires, Worker B takes over.
+        // Worker A (with stale token) should get LockLost when trying to write checkpoint.
+        let (queue, _db) = setup_db().await;
+        let pool = queue.pool().clone();
+
+        let id = queue
+            .enqueue("test", "payload", EnqueueOptions::default())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let stale_token = uuid::Uuid::now_v7();
+        let current_token = uuid::Uuid::now_v7();
+
+        // Job is locked by current_token (simulating Worker B took over)
+        sqlx::query("UPDATE jobs SET status = 'in_progress', lock_token = $1 WHERE id = $2")
+            .bind(current_token)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Worker A has stale token - checkpoint should fail
+        let mut stale_ack = super::JobAck::new(id, pool.clone(), stale_token);
+        let result = stale_ack
+            .checkpoint("step", || async { Ok::<_, Infallible>(42) })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::CheckpointError::LockLost)
+        ));
+
+        // Worker B has current token - checkpoint should succeed
+        let mut current_ack = super::JobAck::new(id, pool.clone(), current_token);
+        let value: i32 = current_ack
+            .checkpoint("step", || async { Ok::<_, Infallible>(99) })
+            .await
+            .unwrap();
+
+        assert_eq!(value, 99);
+
+        // Verify only one checkpoint exists (from Worker B)
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM checkpoints WHERE job_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
+
+        stale_ack.forget();
+        current_ack.forget();
+    }
 }

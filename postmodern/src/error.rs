@@ -109,3 +109,31 @@ pub enum AdvanceError {
     #[error("advance failed (lock lost or queue not found)")]
     Failed,
 }
+
+/// Checkpoint operation errors.
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointError<E> {
+    /// Checkpoint name used more than once in single execution.
+    #[error("duplicate checkpoint '{0}' in single execution")]
+    DuplicateCheckpoint(String),
+
+    /// Failed to serialize checkpoint value.
+    #[error("failed to serialize checkpoint value")]
+    Serialize(#[source] rmp_serde::encode::Error),
+
+    /// Failed to deserialize stored checkpoint value.
+    #[error("failed to deserialize stored checkpoint value")]
+    Deserialize(#[source] rmp_serde::decode::Error),
+
+    /// Database operation failed.
+    #[error("database error")]
+    Database(#[source] sqlx::Error),
+
+    /// Lock was lost before checkpoint could be written.
+    #[error("lock lost")]
+    LockLost,
+
+    /// Checkpoint closure returned an error.
+    #[error("checkpoint closure failed")]
+    Closure(E),
+}
