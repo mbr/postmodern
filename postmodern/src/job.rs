@@ -292,12 +292,27 @@ impl JobAck {
     /// On first encounter, runs the closure and stores the result. On replay (retry after
     /// failure), returns the stored value without executing the closure.
     ///
-    /// # Errors
+    /// # Replay model
     ///
-    /// Returns [`CheckpointError::DuplicateCheckpoint`] if called twice with the same name in one
-    /// execution. Returns [`CheckpointError::LockLost`] if the job lock was lost before the
-    /// checkpoint could be written. Returns [`CheckpointError::Closure`] if the closure returns
-    /// `Err` (nothing is stored, next attempt re-runs the closure).
+    /// On retry, the job is delivered again, it is the caller's responsibility to run the same
+    /// code path. Completed checkpoints return their stored value without re-executing. Code
+    /// *between* checkpoints re-runs on every replay.
+    ///
+    /// # Idempotence
+    ///
+    /// Checkpoints provide **at-least-once** execution, not exactly-once. A crash between a
+    /// checkpoint's side effect and its storage causes the closure to re-run on the next attempt.
+    /// If the closure performs external side effects (API calls, writes), either:
+    ///
+    /// - Make the operation idempotent (e.g., use an idempotency key with external services)
+    /// - Accept that the operation may execute multiple times on crash
+    ///
+    /// # Naming
+    ///
+    /// Checkpoint names are durability contracts. The same name cannot be used twice in one
+    /// execution, this returns [`CheckpointError::DuplicateCheckpoint`]. For loops, use
+    /// [`checkpoint_seq`](Self::checkpoint_seq) or compose unique names with a stable key:
+    ///  `checkpoint(&format!("fetch-{id}"), ...)`.
     pub async fn checkpoint<T, F, Fut, E>(
         &mut self,
         name: &str,
@@ -365,10 +380,42 @@ impl JobAck {
     /// Unlike [`checkpoint`](Self::checkpoint), allows the same name multiple times within a
     /// single execution. Each encounter gets an incrementing sequence number (0, 1, 2, ...).
     ///
-    /// # Errors
+    /// # When to use
     ///
-    /// Returns [`CheckpointError::LockLost`] if the job lock was lost before the checkpoint could
-    /// be written. Returns [`CheckpointError::Closure`] if the closure returns `Err`.
+    /// Use `checkpoint_seq` for ordered iteration where position is meaningful:
+    ///
+    /// ```ignore
+    /// for item in items {
+    ///     ack.checkpoint_seq("process", || async { work(item) }).await?;
+    /// }
+    /// ```
+    ///
+    /// # Ordering pitfall
+    ///
+    /// Sequence numbers are assigned by **encounter order**, not by any property of the data.
+    /// This is only stable if your code reaches checkpoints in the same order across retries.
+    ///
+    /// **Problematic patterns:**
+    /// - Iterating over `HashMap`, `HashSet`, or other unordered collections
+    /// - Concurrent/parallel iteration (`join_all`, `FuturesUnordered`)
+    /// - Any iteration where order may change between attempts
+    ///
+    /// If the iteration order changes between attempts, sequence numbers will map to different
+    /// items, causing incorrect replay (wrong cached values returned).
+    ///
+    /// # Use keyed checkpoints instead
+    ///
+    /// For unordered or parallel work, use [`checkpoint`](Self::checkpoint) with a stable key
+    /// derived from the item's identity:
+    ///
+    /// ```ignore
+    /// for item in items {
+    ///     ack.checkpoint(&format!("process-{}", item.id), || async { work(item) }).await?;
+    /// }
+    /// ```
+    ///
+    /// The key must be a **stable logical identity** (record ID, UUID), never a positional index
+    /// from an unordered source.
     pub async fn checkpoint_seq<T, F, Fut, E>(
         &mut self,
         name: &str,
