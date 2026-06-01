@@ -343,6 +343,7 @@ impl JobAck {
         .map_err(CheckpointError::Database)?;
 
         if let Some((bytes,)) = existing {
+            tracing::debug!(job_id = %self.id, name, "replaying checkpoint");
             return rmp_serde::from_slice(&bytes).map_err(CheckpointError::Deserialize);
         }
 
@@ -372,6 +373,7 @@ impl JobAck {
             return Err(CheckpointError::LockLost);
         }
 
+        tracing::debug!(job_id = %self.id, name, "checkpoint stored");
         Ok(value)
     }
 
@@ -445,6 +447,7 @@ impl JobAck {
         .map_err(CheckpointError::Database)?;
 
         if let Some((bytes,)) = existing {
+            tracing::debug!(job_id = %self.id, name, seq, "replaying checkpoint");
             return rmp_serde::from_slice(&bytes).map_err(CheckpointError::Deserialize);
         }
 
@@ -473,6 +476,7 @@ impl JobAck {
             return Err(CheckpointError::LockLost);
         }
 
+        tracing::debug!(job_id = %self.id, name, seq, "checkpoint stored");
         Ok(value)
     }
 
