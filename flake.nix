@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-25.11";
+    nixpkgs.url = "nixpkgs/nixos-26.05";
     fenix = {
       url = "fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -8,6 +8,8 @@
     flake-utils.url = "flake-utils";
     pgdb = {
       url = "github:mbr/pgdb-rs";
+      inputs.fenix.follows = "fenix";
+      inputs.flake-utils.follows = "flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
