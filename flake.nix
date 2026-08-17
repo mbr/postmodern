@@ -78,7 +78,7 @@
           rustEnv
           // {
             inputsFrom = [ self.packages.${system}.default ];
-            packages = [ devToolchain ];
+            nativeBuildInputs = [ devToolchain ];
             buildInputs = [
               pkgs.cargo-insta
               pkgs.nixfmt
